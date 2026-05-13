@@ -1,0 +1,6 @@
+src/
+tests/
+build.js
+.windsurf/
+*.test.js
+node_modules/

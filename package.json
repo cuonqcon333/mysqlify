@@ -1,0 +1,60 @@
+{
+  "name": "@caplab/mysqlify",
+  "version": "0.0.1",
+  "description": "Fluent MySQL/MariaDB query builder for Node.js - async/await, Eloquent-style Models, migrations, security built-in",
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "bin": {
+    "mysqlify": "bin/mysqlify.cjs"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mysql",
+    "mariadb",
+    "query-builder",
+    "orm",
+    "migrations",
+    "eloquent",
+    "async",
+    "promise"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "mysql2": "^3.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "stubs",
+    "README.md"
+  ],
+  "directories": {
+    "test": "tests"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cuonqcon333/mysqlify"
+  }
+}
