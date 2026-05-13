@@ -56,6 +56,35 @@ export class Model {
     Model._hooks[key].push(fn);
   }
 
+  /**
+   * Register a class-based observer.
+   * The observer class can define any of: creating, created, updating, updated,
+   * deleting, deleted, saving, saved, restoring, restored.
+   *
+   * @example
+   * class UserObserver {
+   *   created(user) { console.log('created', user.id); }
+   *   deleting(user) { if (user.is_admin) return false; } // return false to cancel
+   * }
+   * User.observe(new UserObserver());
+   * // or pass the class itself:
+   * User.observe(UserObserver);
+   */
+  static observe(observer) {
+    const instance = typeof observer === 'function' ? new observer() : observer;
+    const events = [
+      'creating', 'created', 'updating', 'updated',
+      'saving', 'saved', 'deleting', 'deleted',
+      'restoring', 'restored',
+    ];
+    for (const event of events) {
+      if (typeof instance[event] === 'function') {
+        this.on(event, (model) => instance[event](model));
+      }
+    }
+    return this;
+  }
+
   static async _fire(event, instance) {
     const key = `${this.name}:${event}`;
     const fns = Model._hooks[key] ?? [];
@@ -76,16 +105,62 @@ export class Model {
     }
   }
 
+  // ── Global Scopes ──────────────────────────────────────────────────────────
+
+  static _globalScopes = null; // Map<name, fn> — per-class, lazy init
+  static _skipGlobalScopes = null; // Set<name> — per-call skip list
+
+  /**
+   * Register a global scope applied to every query on this model.
+   * @param {string} name  Unique name (used for removal)
+   * @param {(qb: QueryBuilder) => void} fn
+   */
+  static addGlobalScope(name, fn) {
+    if (!this._globalScopes || !Object.prototype.hasOwnProperty.call(this, '_globalScopes')) {
+      this._globalScopes = new Map();
+    }
+    this._globalScopes.set(name, fn);
+    return this;
+  }
+
+  /**
+   * Permanently remove a global scope from this model.
+   */
+  static removeGlobalScope(name) {
+    this._globalScopes?.delete(name);
+    return this;
+  }
+
+  /**
+   * Returns a wrapper that skips the given global scope(s) for ONE query chain.
+   * e.g. User.withoutGlobalScope('tenant').get()
+   */
+  static withoutGlobalScope(...names) {
+    const qb = this._query({ skipScopes: new Set(names) });
+    return this._wrapQueryBuilder(qb);
+  }
+
   // Internal: build a QueryBuilder for this model 
 
-  static _query(conn = null) {
+  static _query(opts = null) {
+    const conn = opts?.conn ?? (typeof opts === 'object' && opts !== null && !opts.conn ? null : opts);
+    const skipScopes = opts?.skipScopes ?? null;
     const tableName = this._resolveTable();
     const qb = new QueryBuilder().table(tableName);
 
-    if (conn) qb._useConnection(conn);
+    const actualConn = typeof opts === 'object' && opts !== null ? opts.conn ?? null : opts;
+    if (actualConn) qb._useConnection(actualConn);
 
     if (this.softDelete) {
       qb._setSoftDelete('deleted_at');
+    }
+
+    // Apply global scopes
+    if (this._globalScopes) {
+      for (const [name, fn] of this._globalScopes) {
+        if (skipScopes && skipScopes.has(name)) continue;
+        fn(qb);
+      }
     }
 
     return qb;
@@ -95,7 +170,7 @@ export class Model {
     const ModelClass = this;
     const proxy = Object.create(ModelClass);
     proxy._conn = conn;
-    proxy._query = () => ModelClass._query(conn);
+    proxy._query = (opts = null) => ModelClass._query({ conn, ...(opts ?? {}) });
     proxy._hydrate = (row) => ModelClass._hydrate(row);
     proxy._hydrateAll = (rows) => ModelClass._hydrateAll(rows);
     proxy._wrapQueryBuilder = (qb) => ModelClass._wrapQueryBuilder(qb);

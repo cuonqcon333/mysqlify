@@ -2,6 +2,23 @@ import mysql from 'mysql2/promise';
 
 let _pool = null;
 let _config = {};
+const _queryListeners = [];
+
+/**
+ * Register a listener for every executed query.
+ * Callback receives { sql, params, time } where time is ms.
+ * @param {(info: { sql: string, params: any[], time: number }) => void} fn
+ */
+export function listen(fn) {
+  _queryListeners.push(fn);
+}
+
+/**
+ * Remove all registered query listeners.
+ */
+export function clearListeners() {
+  _queryListeners.length = 0;
+}
 
 const DEFAULT_CONFIG = {
   host: 'localhost',
@@ -83,14 +100,24 @@ export async function execute(sql, params = [], conn = null) {
   const runner = conn || getPool();
   const config = getConfig();
 
-  if (config.auditLog) {
-    const logFn = config.logger
-      ? config.logger
-      : (msg) => console.log('[mysqlify]', msg);
-    logFn(`QUERY: ${sql} | PARAMS_COUNT: ${params.length}`);
+  const hasListeners = _queryListeners.length > 0;
+  const hasAuditLog = config.auditLog;
+
+  const start = (hasListeners || hasAuditLog) ? Date.now() : 0;
+  const result = await runner.execute(sql, params);
+  const time = start ? Date.now() - start : 0;
+
+  if (hasAuditLog) {
+    const logFn = config.logger ?? ((msg) => console.log('[mysqlify]', msg));
+    logFn(`QUERY (${time}ms): ${sql} | PARAMS: ${JSON.stringify(params)}`);
   }
 
-  return runner.execute(sql, params);
+  if (hasListeners) {
+    const info = { sql, params, time };
+    for (const fn of _queryListeners) fn(info);
+  }
+
+  return result;
 }
 
 /**

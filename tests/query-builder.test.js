@@ -9,6 +9,8 @@ await jest.unstable_mockModule('../src/connection.js', () => ({
   disconnect: jest.fn(),
   getPool: jest.fn(),
   transaction: jest.fn(),
+  listen: jest.fn(),
+  clearListeners: jest.fn(),
 }));
 
 const { QueryBuilder, DB } = await import('../src/query-builder.js');
@@ -381,5 +383,22 @@ describe('DB.transaction()', () => {
     });
 
     expect(mockTrxFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── DB.listen() / Query logging ─────────────────────────────────────────────
+
+describe('DB.listen()', () => {
+  test('listen() delegates to connection.listen', async () => {
+    const { listen: mockListen } = await import('../src/connection.js');
+    const fn = jest.fn();
+    DB.listen(fn);
+    expect(mockListen).toHaveBeenCalledWith(fn);
+  });
+
+  test('clearListeners() delegates to connection.clearListeners', async () => {
+    const { clearListeners: mockClear } = await import('../src/connection.js');
+    DB.clearListeners();
+    expect(mockClear).toHaveBeenCalled();
   });
 });

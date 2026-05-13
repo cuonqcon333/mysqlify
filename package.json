@@ -1,6 +1,6 @@
 {
   "name": "@caplab/mysqlify",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Fluent MySQL/MariaDB query builder for Node.js - async/await, Eloquent-style Models, migrations, security built-in",
   "type": "module",
   "main": "./dist/cjs/index.js",

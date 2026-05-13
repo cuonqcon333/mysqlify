@@ -9,6 +9,8 @@ await jest.unstable_mockModule('../src/connection.js', () => ({
   disconnect: jest.fn(),
   getPool: jest.fn(),
   transaction: jest.fn(),
+  listen: jest.fn(),
+  clearListeners: jest.fn(),
 }));
 
 const { Model } = await import('../src/model.js');
@@ -1120,6 +1122,103 @@ describe('Model.upsertMany()', () => {
     expect(sql).toContain('`status` = VALUES(`status`)');
     expect(sql).not.toContain('`provider` = VALUES(`provider`)');
     expect(sql).not.toContain('`email` = VALUES(`email`)');
+  });
+});
+
+// ─── Global Scopes ───────────────────────────────────────────────────────────
+
+class TenantUser extends Model {
+  static table = 'users';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+}
+
+describe('Global Scopes', () => {
+  beforeEach(() => {
+    TenantUser.removeGlobalScope('tenant');
+    mockExecute.mockClear();
+  });
+
+  test('addGlobalScope applies WHERE to every query', async () => {
+    TenantUser.addGlobalScope('tenant', (q) => q.where('tenant_id', 42));
+    mockExecute.mockResolvedValue([[{ id: 1, name: 'Alice', tenant_id: 42 }]]);
+    await TenantUser.where('active', 1).get();
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`tenant_id` = ?');
+    expect(params).toContain(42);
+  });
+
+  test('withoutGlobalScope skips the named scope', async () => {
+    TenantUser.addGlobalScope('tenant', (q) => q.where('tenant_id', 42));
+    mockExecute.mockResolvedValue([[]]);
+    await TenantUser.withoutGlobalScope('tenant').get();
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).not.toContain('tenant_id');
+  });
+
+  test('removeGlobalScope permanently removes it', async () => {
+    TenantUser.addGlobalScope('tenant', (q) => q.where('tenant_id', 42));
+    TenantUser.removeGlobalScope('tenant');
+    mockExecute.mockResolvedValue([[]]);
+    await TenantUser.all();
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).not.toContain('tenant_id');
+  });
+});
+
+// ─── Observer system ─────────────────────────────────────────────────────────
+
+class ObservedModel extends Model {
+  static table = 'observed';
+  static timestamps = false;
+  static fillable = ['name'];
+  static guarded = [];
+}
+
+describe('Observer system', () => {
+  beforeEach(() => {
+    Model._hooks = {};
+  });
+
+  test('observe() registers lifecycle hooks from a class', async () => {
+    const calls = [];
+    class MyObserver {
+      created(inst) { calls.push(['created', inst.name]); }
+      deleting(inst) { calls.push(['deleting', inst.name]); }
+    }
+    ObservedModel.observe(new MyObserver());
+
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 1, affectedRows: 1 }])  // insert
+      .mockResolvedValueOnce([[{ id: 1, name: 'Test' }]]);          // find after create
+
+    await ObservedModel.create({ name: 'Test' });
+    expect(calls[0]).toEqual(['created', 'Test']);
+  });
+
+  test('observe() accepts a class constructor', () => {
+    const calls = [];
+    class MyObserver {
+      creating(inst) { calls.push('creating'); }
+    }
+    ObservedModel.observe(MyObserver);
+    const key = 'ObservedModel:creating';
+    expect(Model._hooks[key]).toBeDefined();
+    expect(Model._hooks[key].length).toBe(1);
+  });
+
+  test('observer returning false cancels operation', async () => {
+    class BlockObserver {
+      deleting() { return false; }
+    }
+    ObservedModel.observe(new BlockObserver());
+
+    const instance = ObservedModel._hydrate({ id: 1, name: 'Test' });
+    instance._exists = true;
+    const result = await instance.destroy();
+    expect(result).toBe(0);
+    expect(mockExecute).not.toHaveBeenCalled();
   });
 });
 

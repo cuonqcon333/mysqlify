@@ -15,6 +15,9 @@ Fluent MySQL/MariaDB query builder for Node.js - async/await first, Eloquent-sty
 - **Local Scopes** - `static scopeActive(q)` → `User.query().active().get()`
 - **Accessors / Mutators** - `get fullName()`, `set password()`, `static appends`
 - **Collection** - `pluck()`, `groupBy()`, `keyBy()`, `chunk()`, `unique()`, `sum()`
+- **Global Scopes** - `addGlobalScope()`, `withoutGlobalScope()` — auto WHERE on every query
+- **Observers** - `User.observe(UserObserver)` — class-based lifecycle hooks
+- **Query Logging** - `DB.listen(({ sql, time }) => ...)` — profile every query
 - **Lifecycle Hooks** - `boot()`, `creating/created`, `updating/updated`, `deleting/deleted`, `restoring/restored`
 - **Transactions** - `DB.transaction()` with auto-commit/rollback, Models participate too
 - **Dirty tracking** - `isDirty()`, `getDirty()`, `save()` only sends changed fields
@@ -611,6 +614,74 @@ users.toArray();                 // plain array of toJSON() objects
 const user    = await User.findBy('email', 'j@x.com');
 const account = await Account.findBy('slug', 'my-project');
 ```
+
+### Global Scopes
+
+Apply automatic WHERE conditions to **every** query on a Model — perfect for multi-tenancy, soft rules, or visibility filters.
+
+```js
+class Post extends Model {
+  static boot() {
+    // Auto-filter by tenant on every query
+    this.addGlobalScope('tenant', (q) => q.where('tenant_id', getCurrentTenantId()));
+    // Auto-filter published only
+    this.addGlobalScope('published', (q) => q.where('published', 1));
+  }
+}
+
+// All queries now include WHERE tenant_id = ? AND published = ?
+await Post.where('user_id', 1).get();
+
+// Skip one scope for this query only
+await Post.withoutGlobalScope('published').get();
+
+// Remove permanently
+Post.removeGlobalScope('tenant');
+```
+
+### Observer system
+
+Group all lifecycle hooks for a Model into a single class. Cleaner than multiple `on()` calls.
+
+```js
+class UserObserver {
+  creating(user) {
+    if (!user.role) user.role = 'member'; // set default
+  }
+  created(user) {
+    mailer.sendWelcome(user.email); // side effect
+  }
+  deleting(user) {
+    if (user.is_admin) return false; // cancel delete
+  }
+}
+
+// Register — accepts instance or class
+User.observe(new UserObserver());
+User.observe(UserObserver); // also works
+```
+
+Supported events: `creating`, `created`, `updating`, `updated`, `saving`, `saved`, `deleting`, `deleted`, `restoring`, `restored`.
+
+### Query Logging
+
+```js
+import { DB } from '@caplab/mysqlify';
+
+// Log every query with timing
+DB.listen(({ sql, params, time }) => {
+  console.log(`[${time}ms] ${sql}`, params);
+});
+
+// Or use the standalone import
+import { listen } from '@caplab/mysqlify';
+listen(({ sql, time }) => slowQueryLog(sql, time));
+
+// Clean up (useful in tests)
+DB.clearListeners();
+```
+
+> The legacy `auditLog: true` option in `connect()` is still supported and now also includes timing.
 
 ### Relationships
 

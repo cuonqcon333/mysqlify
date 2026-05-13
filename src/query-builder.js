@@ -1,4 +1,4 @@
-import { execute, getConfig, transaction as _transaction } from './connection.js';
+import { execute, getConfig, transaction as _transaction, listen as _listen, clearListeners as _clearListeners } from './connection.js';
 import {
   validateIdentifier,
   validateIdentifiers,
@@ -688,6 +688,23 @@ export const DB = {
     }
     const [rows] = await execute(sql, bindings);
     return rows;
+  },
+
+  /**
+   * Register a listener that fires after every executed query.
+   * @param {(info: { sql: string, params: any[], time: number }) => void} fn
+   */
+  listen(fn) {
+    _listen(fn);
+    return this;
+  },
+
+  /**
+   * Remove all registered query listeners.
+   */
+  clearListeners() {
+    _clearListeners();
+    return this;
   },
 
   async transaction(callback) {
