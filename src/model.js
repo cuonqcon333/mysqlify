@@ -439,7 +439,8 @@ export class Model {
   }
 
   static async upsertMany(rows, updateKeysOrOptions = []) {
-    if (!Array.isArray(rows) || rows.length === 0) return { affectedRows: 0 };
+    if (!Array.isArray(rows) || rows.length === 0) return { inserted: 0, updated: 0, rows: new Collection([]) };
+    this._bootIfNeeded();
     const now = _now();
     const prepared = rows.map((r) => {
       let filtered = { ...this._normalizeInput(r) };
@@ -452,22 +453,62 @@ export class Model {
       return filtered;
     });
 
-    // Resolve updateKeys from options
+    // Resolve updateKeys + conflictFields from options
     const firstRow = prepared[0];
     const allKeys = Object.keys(firstRow);
     let updateKeys;
+    let conflictFields = [];
     if (Array.isArray(updateKeysOrOptions)) {
       updateKeys = updateKeysOrOptions;
       if (updateKeys.length === 0) updateKeys = allKeys.filter((k) => k !== this.primaryKey);
       if (this.timestamps && !updateKeys.includes('updated_at')) updateKeys = [...updateKeys, 'updated_at'];
     } else {
-      const { conflictFields = [], update } = updateKeysOrOptions;
+      conflictFields = updateKeysOrOptions.conflictFields ?? [];
+      const { update } = updateKeysOrOptions;
       updateKeys = (update && update.length > 0)
         ? update
         : allKeys.filter((k) => k !== this.primaryKey && !conflictFields.includes(k));
       if (this.timestamps && !updateKeys.includes('updated_at')) updateKeys = [...updateKeys, 'updated_at'];
     }
-    return this._query().upsertMany(prepared, updateKeys);
+
+    // MySQL: affectedRows=1 per INSERT, affectedRows=2 per UPDATE, affectedRows=0 per no-op
+    const result = await this._query().upsertMany(prepared, updateKeys);
+    const affectedRows = result.affectedRows ?? 0;
+    // MySQL affectedRows semantics: INSERT = 1, UPDATE = 2, no-op = 0
+    // Total rows = i + u, affectedRows = i + 2u → u = affectedRows - totalRows
+    const totalRows = prepared.length;
+    const updatedCount = Math.max(0, affectedRows - totalRows);
+    const insertedCount = totalRows - updatedCount;
+
+    // Re-fetch the upserted rows to return hydrated instances
+    // Strategy: if conflictFields are known, use tuple IN; otherwise fallback to primary key range
+    let fetchedRows;
+    if (conflictFields.length > 0 && conflictFields.length === 1) {
+      // Single conflict field: WHERE col IN (...)
+      const col = conflictFields[0];
+      const vals = [...new Set(prepared.map((r) => r[col]).filter((v) => v != null))];
+      fetchedRows = vals.length
+        ? this._hydrateAll(await this._query().whereIn(col, vals).get())
+        : [];
+    } else if (conflictFields.length > 1) {
+      // Multiple conflict fields: WHERE (col1, col2, ...) IN ((v1, v2), ...)
+      const colList = conflictFields.map((c) => `\`${c}\``).join(', ');
+      const rowPlaceholders = prepared.map(() => `(${conflictFields.map(() => '?').join(', ')})`).join(', ');
+      const bindings = prepared.flatMap((r) => conflictFields.map((c) => r[c] ?? null));
+      const rawExpr = `(${colList}) IN (${rowPlaceholders})`;
+      fetchedRows = this._hydrateAll(await this._query().whereRaw(rawExpr, bindings).get());
+    } else {
+      // No conflict fields known — fetch last N rows by primary key DESC
+      fetchedRows = this._hydrateAll(
+        await this._query().orderBy(this.primaryKey, 'desc').limit(totalRows).get()
+      );
+    }
+
+    return {
+      inserted: insertedCount,
+      updated: updatedCount,
+      rows: new Collection(fetchedRows),
+    };
   }
 
   static async upsert(data, updateKeysOrOptions = []) {

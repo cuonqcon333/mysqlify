@@ -1096,7 +1096,12 @@ class Sync extends Model {
 
 describe('Model.upsertMany()', () => {
   test('generates single batch INSERT ... ON DUPLICATE KEY UPDATE', async () => {
-    mockExecute.mockResolvedValue([{ affectedRows: 4 }]);
+    mockExecute
+      .mockResolvedValueOnce([{ affectedRows: 4 }])  // upsert
+      .mockResolvedValueOnce([[              // fetch back
+        { id: 1, provider: 'google', email: 'a@g.com', status: 'active' },
+        { id: 2, provider: 'google', email: 'b@g.com', status: 'active' },
+      ]]);
     await Sync.upsertMany(
       [
         { provider: 'google', email: 'a@g.com', status: 'active' },
@@ -1113,7 +1118,9 @@ describe('Model.upsertMany()', () => {
   });
 
   test('upsertMany with options object — auto exclude conflictFields', async () => {
-    mockExecute.mockResolvedValue([{ affectedRows: 2 }]);
+    mockExecute
+      .mockResolvedValueOnce([{ affectedRows: 2 }])
+      .mockResolvedValueOnce([[{ id: 1, provider: 'google', email: 'a@g.com', status: 'active' }]]);
     await Sync.upsertMany(
       [{ provider: 'google', email: 'a@g.com', status: 'active' }],
       { conflictFields: ['provider', 'email'] }
@@ -1122,6 +1129,30 @@ describe('Model.upsertMany()', () => {
     expect(sql).toContain('`status` = VALUES(`status`)');
     expect(sql).not.toContain('`provider` = VALUES(`provider`)');
     expect(sql).not.toContain('`email` = VALUES(`email`)');
+  });
+
+  test('upsertMany returns { inserted, updated, rows } with hydrated instances', async () => {
+    mockExecute
+      // 2 rows: affectedRows=3 → 1 INSERT (1) + 1 UPDATE (2) = 3
+      .mockResolvedValueOnce([{ affectedRows: 3 }])
+      .mockResolvedValueOnce([[  // fetch back by tuple IN
+        { id: 1, provider: 'google', email: 'a@g.com', status: 'active' },
+        { id: 2, provider: 'google', email: 'b@g.com', status: 'active' },
+      ]]);
+    const result = await Sync.upsertMany(
+      [
+        { provider: 'google', email: 'a@g.com', status: 'active' },
+        { provider: 'google', email: 'b@g.com', status: 'active' },
+      ],
+      { conflictFields: ['provider', 'email'] }
+    );
+    expect(result.inserted).toBe(1);
+    expect(result.updated).toBe(1);
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[0].email).toBe('a@g.com');
+    // fetch query uses tuple IN
+    const [fetchSql] = mockExecute.mock.calls[1];
+    expect(fetchSql).toContain('(`provider`, `email`) IN');
   });
 });
 
