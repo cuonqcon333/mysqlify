@@ -533,18 +533,34 @@ export class QueryBuilder {
     return result.affectedRows;
   }
 
-  async upsertMany(rows, updateKeys) {
+  async upsertMany(rows, updateKeysOrOptions) {
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new MysqlifySecurityError('upsertMany requires a non-empty array of objects.');
-    }
-    if (!Array.isArray(updateKeys) || updateKeys.length === 0) {
-      throw new MysqlifySecurityError('upsertMany requires a non-empty updateKeys array.');
     }
     rows.forEach((r) => validateDataObject(r));
 
     const keys = Object.keys(rows[0]);
     if (keys.length === 0) throw new MysqlifySecurityError('No columns to upsert.');
     validateIdentifiers(keys, 'column');
+
+    // Resolve updateKeys — accept array or options object { conflictFields?, update? }
+    let updateKeys;
+    if (Array.isArray(updateKeysOrOptions)) {
+      updateKeys = updateKeysOrOptions;
+    } else if (updateKeysOrOptions && typeof updateKeysOrOptions === 'object') {
+      const { conflictFields = [], update } = updateKeysOrOptions;
+      updateKeys = (update && update.length > 0)
+        ? update
+        : keys.filter((k) => !conflictFields.includes(k));
+    } else {
+      throw new MysqlifySecurityError(
+        'upsertMany requires an updateKeys array or options object ({ conflictFields?, update? }) as second argument.'
+      );
+    }
+
+    if (updateKeys.length === 0) {
+      throw new MysqlifySecurityError('upsertMany: no columns to update after excluding conflictFields.');
+    }
     validateIdentifiers(updateKeys, 'column');
 
     const cols = keys.map((k) => `\`${k}\``).join(', ');
