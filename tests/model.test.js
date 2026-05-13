@@ -863,6 +863,146 @@ describe('Model.insertMany() + Model.upsert()', () => {
   });
 });
 
+// ─── Collection ─────────────────────────────────────────────────────────────
+
+const { Collection } = await import('../src/model.js');
+
+describe('Collection', () => {
+  const items = [
+    { id: 1, role: 'admin', score: 10 },
+    { id: 2, role: 'user',  score: 5  },
+    { id: 3, role: 'admin', score: 20 },
+  ];
+  const col = new Collection(items);
+
+  test('pluck() returns array of values', () => {
+    expect(col.pluck('id')).toEqual([1, 2, 3]);
+  });
+
+  test('groupBy() groups correctly', () => {
+    const grouped = col.groupBy('role');
+    expect(grouped['admin'].length).toBe(2);
+    expect(grouped['user'].length).toBe(1);
+  });
+
+  test('keyBy() maps by key', () => {
+    const keyed = col.keyBy('id');
+    expect(keyed[2].role).toBe('user');
+  });
+
+  test('first() returns first item', () => {
+    expect(col.first().id).toBe(1);
+  });
+
+  test('last() returns last item', () => {
+    expect(col.last().id).toBe(3);
+  });
+
+  test('sum() aggregates column', () => {
+    expect(col.sum('score')).toBe(35);
+  });
+
+  test('count() returns length', () => {
+    expect(col.count()).toBe(3);
+  });
+
+  test('filter() returns Collection', () => {
+    const admins = col.filter((i) => i.role === 'admin');
+    expect(admins.length).toBe(2);
+  });
+
+  test('chunk() splits into subarrays', () => {
+    const chunks = col.chunk(2);
+    expect(chunks.length).toBe(2);
+    expect(chunks[0].length).toBe(2);
+    expect(chunks[1].length).toBe(1);
+  });
+
+  test('unique() removes duplicates by key', () => {
+    const unique = col.unique('role');
+    expect(unique.length).toBe(2);
+  });
+});
+
+// ─── Local Scopes ────────────────────────────────────────────────────────────
+
+class ScopedUser extends Model {
+  static table = 'users';
+  static timestamps = false;
+  static fillable = ['name', 'role'];
+  static guarded = [];
+
+  static scopeActive(q) { q.where('active', 1); }
+  static scopeRole(q, role) { q.where('role', role); }
+}
+
+describe('Local Scopes', () => {
+  test('.query().active() applies where clause', async () => {
+    mockExecute.mockResolvedValue([[{ id: 1, name: 'Alice', active: 1 }]]);
+    await ScopedUser.query().active().get();
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`active` = ?');
+  });
+
+  test('.query().role(\'admin\') passes arguments to scope', async () => {
+    mockExecute.mockResolvedValue([[{ id: 1, name: 'Bob', role: 'admin' }]]);
+    await ScopedUser.query().role('admin').get();
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`role` = ?');
+    expect(params).toContain('admin');
+  });
+
+  test('scopes are chainable', async () => {
+    mockExecute.mockResolvedValue([[]]);
+    await ScopedUser.query().active().role('admin').get();
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`active` = ?');
+    expect(sql).toContain('`role` = ?');
+  });
+});
+
+// ─── Accessors / appends ─────────────────────────────────────────────────────
+
+class Person extends Model {
+  static table = 'people';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+  static appends = ['fullName'];
+
+  get fullName() {
+    return `${this.first_name} ${this.last_name}`;
+  }
+}
+
+describe('Accessors / appends', () => {
+  test('accessor is accessible on instance', () => {
+    const row = { id: 1, first_name: 'John', last_name: 'Doe' };
+    const instance = Person._hydrate(row);
+    expect(instance.fullName).toBe('John Doe');
+  });
+
+  test('appended field is included in toJSON()', () => {
+    const row = { id: 1, first_name: 'John', last_name: 'Doe' };
+    const instance = Person._hydrate(row);
+    const json = instance.toJSON();
+    expect(json.fullName).toBe('John Doe');
+  });
+});
+
+// ─── findBy ──────────────────────────────────────────────────────────────────
+
+describe('Model.findBy()', () => {
+  test('queries by given column', async () => {
+    mockExecute.mockResolvedValue([[{ id: 1, name: 'Alice', email: 'a@x.com' }]]);
+    const user = await User.findBy('email', 'a@x.com');
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`email` = ?');
+    expect(params).toContain('a@x.com');
+    expect(user).toBeTruthy();
+  });
+});
+
 // ─── Hidden fix: internal access should work, output should strip ───────────
 
 class Secret extends Model {

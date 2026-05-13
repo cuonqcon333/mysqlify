@@ -11,6 +11,9 @@ Fluent MySQL/MariaDB query builder for Node.js - async/await first, Eloquent-sty
 
 - **Fluent Query Builder** - chainable API, `await` friendly
 - **Eloquent-style Models** - `fillable`, `hidden`, `casts`, `timestamps`, `softDelete`
+- **Local Scopes** - `static scopeActive(q)` → `User.query().active().get()`
+- **Accessors / Mutators** - `get fullName()`, `set password()`, `static appends`
+- **Collection** - `pluck()`, `groupBy()`, `keyBy()`, `chunk()`, `unique()`, `sum()`
 - **Lifecycle Hooks** - `boot()`, `creating/created`, `updating/updated`, `deleting/deleted`, `restoring/restored`
 - **Transactions** - `DB.transaction()` with auto-commit/rollback, Models participate too
 - **Dirty tracking** - `isDirty()`, `getDirty()`, `save()` only sends changed fields
@@ -18,7 +21,7 @@ Fluent MySQL/MariaDB query builder for Node.js - async/await first, Eloquent-sty
 - **Field aliases** - map DB columns to response keys (`access_token` → `accessToken`)
 - **Auto snake_case** - opt-in camelCase input → snake_case DB column conversion
 - **Date auto-convert** - `Date`, ISO strings auto-serialized to MySQL `DATETIME`
-- **Helpers** - `firstOrCreate()`, `updateOrCreate()`, `findOrFail()`, `findMany()`
+- **Helpers** - `firstOrCreate()`, `updateOrCreate()`, `findOrFail()`, `findMany()`, `findBy()`
 - **Migrations** - Laravel-style `up/down`, CLI runner
 - **Security built-in** - SQL injection prevention, XSS sanitization, mass assignment protection
 - **Dual CJS + ESM** - works with both `require()` and `import`
@@ -469,6 +472,85 @@ User.on('created', async (user) => {
 
 ---
 
+### Local Scopes
+
+Define reusable query constraints as `static scopeXxx(q)` methods. Access them via `.query()` or any chainable entry point.
+
+```js
+class User extends Model {
+  static scopeActive(q)       { q.where('active', 1); }
+  static scopeRole(q, role)   { q.where('role', role); }
+  static scopeRecent(q, days) { q.whereRaw('created_at > DATE_SUB(NOW(), INTERVAL ? DAY)', [days]); }
+}
+
+// Usage — fully chainable
+const users = await User.query().active().role('admin').recent(7).get();
+
+// Works after any filter too
+const admins = await User.where('verified', 1).role('admin').get();
+```
+
+### Accessors, Mutators & `appends`
+
+**Accessors** — computed properties readable on the instance:
+
+```js
+class User extends Model {
+  static appends = ['fullName'];  // include in toJSON() output
+
+  get fullName() {
+    return `${this.first_name} ${this.last_name}`;
+  }
+}
+
+const user = await User.find(1);
+user.fullName;           // 'John Doe' — accessible in code
+res.json(user);          // { ..., fullName: 'John Doe' } — in response
+```
+
+**Mutators** — intercept assignment using JS `set` accessor:
+
+```js
+class User extends Model {
+  set password(value) {
+    this._attributes.password = bcrypt.hashSync(value, 10);
+  }
+}
+
+const user = new User();
+user.password = 'plain-text';   // auto-hashed via mutator
+await user.save();
+```
+
+### Collection
+
+`get()` and `all()` return a `Collection` — a full Array subclass with extra helpers.
+
+```js
+import { Collection } from '@caplab/mysqlify';
+
+const users = await User.where('active', 1).get(); // Collection
+
+users.pluck('email');            // ['a@x.com', 'b@x.com']
+users.groupBy('role');           // { admin: [...], user: [...] }
+users.keyBy('id');               // { 1: user, 2: user, ... }
+users.sum('score');              // 235
+users.first();                   // first User instance
+users.last();                    // last User instance
+users.chunk(10);                 // array of Collection chunks
+users.unique('role');            // deduplicate by column
+users.filter(u => u.active);    // native Array.filter — still works
+users.map(u => u.email);        // native Array.map — still works
+users.toArray();                 // plain array of toJSON() objects
+```
+
+### `findBy()` — dynamic finder
+
+```js
+const user    = await User.findBy('email', 'j@x.com');
+const account = await Account.findBy('slug', 'my-project');
+```
+
 ### Relationships
 
 ```js
@@ -760,6 +842,30 @@ import { DB, Model, connect, transaction } from '@caplab/mysqlify';
 ```
 
 Both fully supported - the package ships `dist/cjs` and `dist/esm` builds.
+
+---
+
+## Philosophy
+
+mysqlify is not trying to be Prisma or Drizzle.
+
+**Prisma** wins on type safety and schema generation. **Drizzle** wins on SQL purity and zero overhead. mysqlify wins on something different:
+
+> **Elegance for classic backend development.**
+
+The goal is to make 80% of backend work — CRUD, business logic, auth, background jobs — feel natural and fast to write in Node.js, the same way Laravel Eloquent does in PHP.
+
+That means:
+
+- **SQL-first** — never hide the SQL, always let you drop to raw when needed
+- **Eloquent-inspired** — Models should have behavior, not just be data bags
+- **async-native** — `await` everywhere, no `.then()` chains, no callbacks
+- **Convention over configuration** — sensible defaults, opt-in complexity
+- **Readable over clever** — code you write today you understand in 6 months
+- **Minimal boilerplate** — define a class, start querying
+- **Classic backend ergonomics** — the patterns that work, not the patterns that are trendy
+
+If you want a framework that feels like home for building real Node.js backends on MySQL, mysqlify is built for you.
 
 ---
 

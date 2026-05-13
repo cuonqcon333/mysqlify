@@ -27,6 +27,7 @@ export class Model {
   static casts = {};
   static aliases = {};  // { dbColumn: 'responseKey' } e.g. { access_token: 'accessToken' }
   static snakeCase = false; // opt-in: auto camelCase input keys → snake_case DB columns
+  static appends = [];  // computed accessor keys included in toJSON()
 
   // Boot system 
 
@@ -34,6 +35,17 @@ export class Model {
     if (_bootedClasses.has(this)) return;
     _bootedClasses.add(this);
     if (typeof this.boot === 'function') this.boot();
+  }
+
+  /**
+   * Called by the Proxy below to handle direct scope calls on the class.
+   * e.g. User.active() → User._callScope('active')
+   */
+  static _callScope(scopeName, args) {
+    const fullName = 'scope' + scopeName[0].toUpperCase() + scopeName.slice(1);
+    const qb = this._query();
+    this[fullName](qb, ...args);
+    return this._wrapQueryBuilder(qb);
   }
 
   static _hooks = {};
@@ -58,7 +70,10 @@ export class Model {
     this._original = { ...attributes };
     this._attributes = { ...attributes };
     this._exists = false;
-    Object.assign(this, attributes);
+    // Use mutators if defined (set <Key>(v) setter on prototype)
+    for (const [key, val] of Object.entries(attributes)) {
+      this[key] = val;
+    }
   }
 
   // Internal: build a QueryBuilder for this model 
@@ -121,7 +136,7 @@ export class Model {
 
   static async all() {
     const rows = await this._query().get();
-    return this._hydrateAll(rows);
+    return new Collection(this._hydrateAll(rows));
   }
 
   static async find(id) {
@@ -438,11 +453,29 @@ export class Model {
   }
 
   /**
+   * Entry point for scope-only chains: User.active().get()
+   * Also used internally so scopes defined without where() still chain.
+   */
+  static query() {
+    return this._wrapQueryBuilder(this._query());
+  }
+
+  /**
+   * findBy(column, value) — dynamic finder shorthand
+   * e.g. User.findBy('email', 'a@x.com')
+   */
+  static async findBy(column, value) {
+    const row = await this._query().where(column, value).first();
+    return this._hydrate(row);
+  }
+
+  /**
    * Wraps a QueryBuilder so that .get() and .first() return hydrated Model instances.
+   * Also exposes local scopes defined as static scopeXxx(q) methods.
    */
   static _wrapQueryBuilder(qb) {
     const ModelClass = this;
-    return {
+    const wrapper = {
       _qb: qb,
 
       where(col, op, val) { qb.where(col, op, val); return this; },
@@ -451,6 +484,7 @@ export class Model {
       whereNull(col) { qb.whereNull(col); return this; },
       whereNotNull(col) { qb.whereNotNull(col); return this; },
       whereBetween(col, range) { qb.whereBetween(col, range); return this; },
+      whereRaw(expr, bindings) { qb.whereRaw(expr, bindings); return this; },
       select(...cols) { qb.select(...cols); return this; },
       orderBy(col, dir) { qb.orderBy(col, dir); return this; },
       groupBy(...cols) { qb.groupBy(...cols); return this; },
@@ -465,7 +499,7 @@ export class Model {
 
       async get() {
         const rows = await qb.get();
-        return ModelClass._hydrateAll(rows);
+        return new Collection(ModelClass._hydrateAll(rows));
       },
       async first() {
         const row = await qb.first();
@@ -478,7 +512,7 @@ export class Model {
       async min(col) { return qb.min(col); },
       async paginate(page, perPage) {
         const result = await qb.paginate(page, perPage);
-        result.data = ModelClass._hydrateAll(result.data);
+        result.data = new Collection(ModelClass._hydrateAll(result.data));
         return result;
       },
       async update(data) { return qb.update(data); },
@@ -486,6 +520,23 @@ export class Model {
       async restore() { return qb.restore(); },
       async upsertMany(rows, opts) { return qb.upsertMany(rows, opts); },
     };
+
+    // Local Scopes: auto-proxy scopeXxx static methods as camelCase chainable calls
+    const proxy = new Proxy(wrapper, {
+      get(target, prop) {
+        if (typeof prop !== 'string') return target[prop];
+        if (prop in target) return target[prop];
+        // e.g. .active() → ModelClass.scopeActive(qb)
+        const scopeName = 'scope' + prop[0].toUpperCase() + prop.slice(1);
+        if (typeof ModelClass[scopeName] === 'function') {
+          return (...args) => {
+            ModelClass[scopeName](qb, ...args);
+            return proxy;
+          };
+        }
+      },
+    });
+    return proxy;
   }
 
   // Instance Methods 
@@ -660,6 +711,10 @@ export class Model {
     for (const [dbCol, aliasKey] of Object.entries(aliasMap)) {
       if (dbCol in this) data[aliasKey] = _tryParseJson(this[dbCol]);
     }
+    // Include appended computed accessors (getter methods on the instance)
+    for (const key of (ModelClass.appends ?? [])) {
+      data[key] = typeof this[key] !== 'undefined' ? this[key] : null;
+    }
     const casted = _applyCasts(data, ModelClass.casts ?? {});
     // hidden strips at serialization only — internal code still has full access
     return applyHidden(casted, ModelClass.hidden ?? []);
@@ -667,6 +722,12 @@ export class Model {
 
   getAttribute(key) {
     return this._attributes[key];
+  }
+
+  setAttribute(key, value) {
+    this._attributes[key] = value;
+    this[key] = value;
+    return this;
   }
 
   toArray() {
@@ -708,6 +769,100 @@ export class Model {
       const [rows] = await execute(sql, [pk]);
       return RelatedModel._hydrateAll(rows);
     };
+  }
+}
+
+/**
+ * Collection — a fluent wrapper around an array of Model instances.
+ * Returned by .get() and .paginate().
+ * Extends Array so all native array methods work (forEach, map, filter, etc.)
+ */
+export class Collection extends Array {
+  constructor(items = []) {
+    // When called internally by native Array methods (filter, map, slice),
+    // items may be a number (the length). Guard against that.
+    if (typeof items === 'number') {
+      super(items);
+    } else {
+      super(...items);
+    }
+  }
+
+  // Ensure native array methods (filter, map, slice) return plain Array, not Collection
+  // so we avoid the constructor(number) issue from Array species re-use.
+  static get [Symbol.species]() { return Array; }
+
+  /** Extract a single column from all items */
+  pluck(key) {
+    return Array.from(this, (item) => item[key]);
+  }
+
+  /** Group items into an object keyed by a column value */
+  groupBy(key) {
+    const result = {};
+    for (const item of this) {
+      const k = item[key];
+      if (!(k in result)) result[k] = new Collection();
+      result[k].push(item);
+    }
+    return result;
+  }
+
+  /** Key items into an object — one item per unique key value */
+  keyBy(key) {
+    const result = {};
+    for (const item of this) result[item[key]] = item;
+    return result;
+  }
+
+  /** Return first item, or null */
+  first() {
+    return this[0] ?? null;
+  }
+
+  /** Return last item, or null */
+  last() {
+    return this[this.length - 1] ?? null;
+  }
+
+  /** Chunk into arrays of size n */
+  chunk(size) {
+    const chunks = [];
+    for (let i = 0; i < this.length; i += size) {
+      chunks.push(new Collection(this.slice(i, i + size)));
+    }
+    return chunks;
+  }
+
+  /** Return unique items by column */
+  unique(key) {
+    if (!key) return new Collection([...new Set(this)]);
+    const seen = new Set();
+    return new Collection(Array.from(this).filter((item) => {
+      const v = item[key];
+      if (seen.has(v)) return false;
+      seen.add(v);
+      return true;
+    }));
+  }
+
+  /** Sum a numeric column */
+  sum(key) {
+    return Array.from(this).reduce((acc, item) => acc + (Number(item[key]) || 0), 0);
+  }
+
+  /** Count — alias for .length */
+  count() {
+    return this.length;
+  }
+
+  /** Convert to plain array of toJSON() objects */
+  toArray() {
+    return Array.from(this, (item) => (typeof item.toJSON === 'function' ? item.toJSON() : item));
+  }
+
+  toJSON() {
+    return this.toArray();
   }
 }
 
