@@ -1122,3 +1122,124 @@ describe('Model.upsertMany()', () => {
     expect(sql).not.toContain('`email` = VALUES(`email`)');
   });
 });
+
+// ─── Eager Loading with() ────────────────────────────────────────────────────
+
+class EagerPost extends Model {
+  static table = 'posts';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+
+  author() { return this.belongsTo(EagerUser, 'user_id'); }
+  comments() { return this.hasMany(EagerComment, 'post_id'); }
+}
+
+class EagerComment extends Model {
+  static table = 'comments';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+}
+
+class EagerUser extends Model {
+  static table = 'users';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+
+  posts()   { return this.hasMany(EagerPost, 'user_id'); }
+  profile() { return this.hasOne(EagerProfile, 'user_id'); }
+}
+
+class EagerProfile extends Model {
+  static table = 'profiles';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+}
+
+describe('Eager Loading with()', () => {
+  test('hasMany: attaches relation collection to each parent', async () => {
+    // First query: SELECT * FROM users (1 user)
+    // Second query: SELECT * FROM posts WHERE user_id IN (1)
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 1, name: 'Alice' }]])
+      .mockResolvedValueOnce([[
+        { id: 10, title: 'Post A', user_id: 1 },
+        { id: 11, title: 'Post B', user_id: 1 },
+      ]]);
+
+    const users = await EagerUser.with('posts').get();
+    expect(users[0].posts).toBeDefined();
+    expect(users[0].posts.length).toBe(2);
+    expect(users[0].posts[0].title).toBe('Post A');
+
+    // Second call must use WHERE IN
+    const [sql, params] = mockExecute.mock.calls[1];
+    expect(sql).toContain('WHERE `user_id` IN');
+    expect(params).toContain(1);
+  });
+
+  test('hasOne: attaches single related instance', async () => {
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 1, name: 'Alice' }]])
+      .mockResolvedValueOnce([[{ id: 5, bio: 'Dev', user_id: 1 }]]);
+
+    const users = await EagerUser.with('profile').get();
+    expect(users[0].profile).toBeDefined();
+    expect(users[0].profile.bio).toBe('Dev');
+  });
+
+  test('belongsTo: attaches parent to each related', async () => {
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 10, title: 'Post A', user_id: 1 }]])
+      .mockResolvedValueOnce([[{ id: 1, name: 'Alice' }]]);
+
+    const posts = await EagerPost.with('author').get();
+    expect(posts[0].author).toBeDefined();
+    expect(posts[0].author.name).toBe('Alice');
+  });
+
+  test('constrained with(): applies extra where to relation query', async () => {
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 1, name: 'Alice' }]])
+      .mockResolvedValueOnce([[{ id: 10, title: 'Post A', user_id: 1, published: 1 }]]);
+
+    await EagerUser.with({ posts: (q) => q.where('published', 1) }).get();
+
+    const [sql] = mockExecute.mock.calls[1];
+    expect(sql).toContain('`published` = ?');
+  });
+
+  test('multiple relations loaded in one call', async () => {
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 1, name: 'Alice' }]])
+      .mockResolvedValueOnce([[{ id: 10, title: 'Post A', user_id: 1 }]])
+      .mockResolvedValueOnce([[{ id: 5, bio: 'Dev', user_id: 1 }]]);
+
+    const users = await EagerUser.with('posts', 'profile').get();
+    expect(users[0].posts.length).toBe(1);
+    expect(users[0].profile.bio).toBe('Dev');
+  });
+
+  test('instance.load() lazy-loads a relation', async () => {
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 10, title: 'Post A', user_id: 1 }, { id: 11, title: 'Post B', user_id: 1 }]]);
+
+    const user = EagerUser._hydrate({ id: 1, name: 'Alice' });
+    await user.load('posts');
+
+    expect(user.posts).toBeDefined();
+    expect(user.posts.length).toBe(2);
+  });
+
+  test('hasMany: empty parents get empty Collection', async () => {
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 2, name: 'Bob' }]])
+      .mockResolvedValueOnce([[]]);  // no posts for user 2
+
+    const users = await EagerUser.with('posts').get();
+    expect(users[0].posts.length).toBe(0);
+  });
+});

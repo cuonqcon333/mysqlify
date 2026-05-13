@@ -11,6 +11,7 @@ Fluent MySQL/MariaDB query builder for Node.js - async/await first, Eloquent-sty
 
 - **Fluent Query Builder** - chainable API, `await` friendly
 - **Eloquent-style Models** - `fillable`, `hidden`, `casts`, `timestamps`, `softDelete`
+- **Eager Loading** - `with('posts')`, `with('posts.comments')`, `with({ posts: q => ... })`, `load()`
 - **Local Scopes** - `static scopeActive(q)` → `User.query().active().get()`
 - **Accessors / Mutators** - `get fullName()`, `set password()`, `static appends`
 - **Collection** - `pluck()`, `groupBy()`, `keyBy()`, `chunk()`, `unique()`, `sum()`
@@ -471,6 +472,66 @@ User.on('created', async (user) => {
 ```
 
 ---
+
+### Eager Loading
+
+Load related models in **2 queries** (never N+1). Define relations as instance methods, then use `with()` anywhere.
+
+```js
+class User extends Model {
+  posts()   { return this.hasMany(Post, 'user_id'); }
+  profile() { return this.hasOne(Profile, 'user_id'); }
+}
+
+class Post extends Model {
+  author()   { return this.belongsTo(User, 'user_id'); }
+  comments() { return this.hasMany(Comment, 'post_id'); }
+  tags()     { return this.belongsToMany(Tag, 'post_tags', 'post_id', 'tag_id'); }
+}
+```
+
+**Simple eager load:**
+```js
+const users = await User.with('posts').get();
+users[0].posts;          // Collection of Post instances
+users[0].profile;        // Profile instance or null
+```
+
+**Multiple relations:**
+```js
+const users = await User.with('posts', 'profile').get();
+```
+
+**Constrained eager load:**
+```js
+const users = await User.with({
+  posts: (q) => q.where('published', 1).orderBy('created_at', 'desc')
+}).get();
+```
+
+**Nested (2 levels):**
+```js
+const users = await User.with('posts.comments').get();
+users[0].posts[0].comments;  // comments loaded on each post
+```
+
+**`with()` chains with other methods:**
+```js
+const users = await User.with('posts').where('active', 1).orderBy('name').paginate(1, 20);
+```
+
+**Lazy load on a single instance:**
+```js
+const user = await User.find(1);
+await user.load('posts');      // loads and attaches user.posts
+await user.load('posts', 'profile');  // multiple
+```
+
+**Relation methods are also callable directly:**
+```js
+const user = await User.find(1);
+const posts = await user.posts().get();  // on-demand, no eager
+```
 
 ### Local Scopes
 

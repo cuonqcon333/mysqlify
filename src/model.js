@@ -734,7 +734,53 @@ export class Model {
     return this.toJSON();
   }
 
-  // Relationship helpers 
+  // ── Relationship helpers (instance-method style) ─────────────────────────
+
+  /**
+   * Define a has-one relation on an instance.
+   * Usage: profile() { return this.hasOne(Profile, 'user_id'); }
+   */
+  hasOne(RelatedModel, foreignKey, localKey) {
+    const ModelClass = this.constructor;
+    const fk = foreignKey ?? `${_snakeCase(ModelClass.name)}_id`;
+    const lk = localKey ?? ModelClass.primaryKey;
+    return new _RelationDescriptor('hasOne', RelatedModel, fk, lk, null, null, this);
+  }
+
+  /**
+   * Define a has-many relation on an instance.
+   * Usage: posts() { return this.hasMany(Post, 'user_id'); }
+   */
+  hasMany(RelatedModel, foreignKey, localKey) {
+    const ModelClass = this.constructor;
+    const fk = foreignKey ?? `${_snakeCase(ModelClass.name)}_id`;
+    const lk = localKey ?? ModelClass.primaryKey;
+    return new _RelationDescriptor('hasMany', RelatedModel, fk, lk, null, null, this);
+  }
+
+  /**
+   * Define a belongs-to relation on an instance.
+   * Usage: author() { return this.belongsTo(User, 'user_id'); }
+   */
+  belongsTo(RelatedModel, foreignKey, ownerKey) {
+    const ModelClass = this.constructor;
+    const fk = foreignKey ?? `${_snakeCase(RelatedModel.name)}_id`;
+    const ok = ownerKey ?? RelatedModel.primaryKey;
+    return new _RelationDescriptor('belongsTo', RelatedModel, fk, ok, null, null, this);
+  }
+
+  /**
+   * Define a belongs-to-many (pivot) relation on an instance.
+   * Usage: roles() { return this.belongsToMany(Role, 'user_roles', 'user_id', 'role_id'); }
+   */
+  belongsToMany(RelatedModel, pivotTable, localFk, relatedFk) {
+    const ModelClass = this.constructor;
+    const lfk = localFk ?? `${_snakeCase(ModelClass.name)}_id`;
+    const rfk = relatedFk ?? `${_snakeCase(RelatedModel.name)}_id`;
+    return new _RelationDescriptor('belongsToMany', RelatedModel, lfk, ModelClass.primaryKey, pivotTable, rfk, this);
+  }
+
+  // ── Static helpers (backward-compat) ─────────────────────────────────────
 
   static hasOne(RelatedModel, foreignKey, localKey) {
     const pk = localKey ?? this.primaryKey;
@@ -769,6 +815,234 @@ export class Model {
       const [rows] = await execute(sql, [pk]);
       return RelatedModel._hydrateAll(rows);
     };
+  }
+
+  // ── with() — eager loading entry point ──────────────────────────────────
+
+  /**
+   * Eager-load relations.
+   *
+   * Signatures:
+   *   Model.with('posts')                         // simple
+   *   Model.with('posts', 'profile')              // multiple
+   *   Model.with('posts.comments')                // nested
+   *   Model.with({ posts: q => q.where(...) })    // constrained
+   */
+  static with(...relations) {
+    const eagerMap = _parseEagerArgs(relations);
+    const qb = this._query();
+    const ModelClass = this;
+    const wrapper = this._wrapQueryBuilder(qb);
+
+    // Override get/first/paginate on the wrapper to inject eager loading
+    const origGet = wrapper.get.bind(wrapper);
+    const origFirst = wrapper.first.bind(wrapper);
+    const origPaginate = wrapper.paginate.bind(wrapper);
+
+    wrapper.get = async () => {
+      const collection = await origGet();
+      await ModelClass._loadRelations(Array.from(collection), eagerMap);
+      return collection;
+    };
+    wrapper.first = async () => {
+      const instance = await origFirst();
+      if (instance) await ModelClass._loadRelations([instance], eagerMap);
+      return instance;
+    };
+    wrapper.paginate = async (page, perPage) => {
+      const result = await origPaginate(page, perPage);
+      await ModelClass._loadRelations(Array.from(result.data), eagerMap);
+      return result;
+    };
+
+    return wrapper;
+  }
+
+  /**
+   * Load a named relation on an already-hydrated instance (lazy eager load).
+   * await user.load('posts')
+   */
+  async load(...relations) {
+    const ModelClass = this.constructor;
+    const eagerMap = _parseEagerArgs(relations);
+    await ModelClass._loadRelations([this], eagerMap);
+    return this;
+  }
+
+  /**
+   * Internal: resolve and attach relations for a batch of instances.
+   */
+  static async _loadRelations(instances, eagerMap) {
+    if (!instances.length) return;
+    for (const [relationName, constraint] of Object.entries(eagerMap)) {
+      const dotIdx = relationName.indexOf('.');
+      if (dotIdx !== -1) {
+        // Nested: 'posts.comments' — load 'posts' first, then 'comments' on results
+        const parent = relationName.slice(0, dotIdx);
+        const nested = relationName.slice(dotIdx + 1);
+        // load parent first (if not already loaded)
+        if (!instances[0]?.[parent]) {
+          await this._loadRelations(instances, { [parent]: null });
+        }
+        // collect nested instances
+        const nestedInstances = instances.flatMap((i) => {
+          const rel = i[parent];
+          return Array.isArray(rel) ? rel : rel ? [rel] : [];
+        });
+        if (nestedInstances.length) {
+          const RelatedModel = nestedInstances[0].constructor;
+          await RelatedModel._loadRelations(nestedInstances, { [nested]: null });
+        }
+        continue;
+      }
+
+      // Resolve descriptor by calling the relation method on a dummy instance
+      const dummy = new this();
+      if (typeof dummy[relationName] !== 'function') {
+        throw new Error(`Relation '${relationName}' not found on ${this.name}. Define it as an instance method.`);
+      }
+      const descriptor = dummy[relationName]();
+      descriptor._currentRelationName = relationName;
+      await descriptor._eagerLoad(instances, constraint);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _parseEagerArgs: normalize with() arguments into { relationName: constraintFn|null }
+// ─────────────────────────────────────────────────────────────────────────────
+function _parseEagerArgs(args) {
+  const map = {};
+  for (const arg of args) {
+    if (typeof arg === 'string') {
+      map[arg] = null;
+    } else if (arg && typeof arg === 'object') {
+      for (const [k, v] of Object.entries(arg)) {
+        map[k] = typeof v === 'function' ? v : null;
+      }
+    }
+  }
+  return map;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _RelationDescriptor — carries relation metadata + executes batch eager load
+// ─────────────────────────────────────────────────────────────────────────────
+class _RelationDescriptor {
+  constructor(type, RelatedModel, fk, lk, pivotTable, pivotFk, ownerInstance) {
+    this.type = type;
+    this.RelatedModel = RelatedModel;
+    this.fk = fk;   // foreign key on the related side (hasOne/hasMany) or on owner (belongsTo)
+    this.lk = lk;   // local key on the owner (PK usually)
+    this.pivotTable = pivotTable;
+    this.pivotFk = pivotFk;
+    this.owner = ownerInstance;
+  }
+
+  /** Execute this relation on the owner instance directly (non-eager) */
+  async get() {
+    const instance = this.owner;
+    switch (this.type) {
+      case 'hasOne':
+        return this.RelatedModel.where(this.fk, instance[this.lk]).first();
+      case 'hasMany':
+        return this.RelatedModel.where(this.fk, instance[this.lk]).get();
+      case 'belongsTo':
+        return this.RelatedModel.where(this.lk, instance[this.fk]).first();
+      case 'belongsToMany': {
+        const { RelatedModel, fk, lk, pivotTable, pivotFk } = this;
+        const pkVal = instance[lk];
+        const relatedTable = RelatedModel._resolveTable();
+        const sql = `SELECT \`${relatedTable}\`.* FROM \`${relatedTable}\`
+          INNER JOIN \`${pivotTable}\` ON \`${pivotTable}\`.\`${pivotFk}\` = \`${relatedTable}\`.\`${RelatedModel.primaryKey}\`
+          WHERE \`${pivotTable}\`.\`${fk}\` = ?`;
+        const [rows] = await execute(sql, [pkVal]);
+        return RelatedModel._hydrateAll(rows);
+      }
+    }
+  }
+
+  /**
+   * Batch eager-load this relation for an array of parent instances.
+   * Attaches results directly onto each instance under the relation name.
+   */
+  async _eagerLoad(instances, constraint) {
+    const { type, RelatedModel, fk, lk, pivotTable, pivotFk } = this;
+
+    // Infer the property name from calling context — passed by _loadRelations
+    // We derive it lazily by inspecting what key each instance will receive.
+    // The key is set by the caller after this returns.
+
+    if (type === 'hasOne' || type === 'hasMany') {
+      const parentKeys = [...new Set(instances.map((i) => i[lk]).filter((v) => v != null))];
+      if (!parentKeys.length) return;
+
+      let qb = RelatedModel._query().whereIn(fk, parentKeys);
+      if (constraint) constraint(qb);
+
+      const related = RelatedModel._hydrateAll(await qb.get());
+      const grouped = {};
+      for (const r of related) {
+        const key = r[fk];
+        if (type === 'hasMany') {
+          if (!grouped[key]) grouped[key] = new Collection();
+          grouped[key].push(r);
+        } else {
+          grouped[key] = r;
+        }
+      }
+      for (const inst of instances) {
+        inst._relData = inst._relData ?? {};
+        const val = grouped[inst[lk]] ?? (type === 'hasMany' ? new Collection() : null);
+        inst._relData[this._currentRelationName] = val;
+        inst[this._currentRelationName] = val;
+      }
+
+    } else if (type === 'belongsTo') {
+      const fkVals = [...new Set(instances.map((i) => i[fk]).filter((v) => v != null))];
+      if (!fkVals.length) return;
+
+      let qb = RelatedModel._query().whereIn(lk, fkVals);
+      if (constraint) constraint(qb);
+
+      const related = RelatedModel._hydrateAll(await qb.get());
+      const byKey = {};
+      for (const r of related) byKey[r[lk]] = r;
+
+      for (const inst of instances) {
+        inst._relData = inst._relData ?? {};
+        const val = byKey[inst[fk]] ?? null;
+        inst._relData[this._currentRelationName] = val;
+        inst[this._currentRelationName] = val;
+      }
+
+    } else if (type === 'belongsToMany') {
+      const parentKeys = [...new Set(instances.map((i) => i[lk]).filter((v) => v != null))];
+      if (!parentKeys.length) return;
+
+      const relatedTable = RelatedModel._resolveTable();
+      const inPlaceholders = parentKeys.map(() => '?').join(', ');
+      let sql = `SELECT \`${relatedTable}\`.*, \`${pivotTable}\`.\`${fk}\` AS __pivot_fk
+        FROM \`${relatedTable}\`
+        INNER JOIN \`${pivotTable}\`
+          ON \`${pivotTable}\`.\`${pivotFk}\` = \`${relatedTable}\`.\`${RelatedModel.primaryKey}\`
+        WHERE \`${pivotTable}\`.\`${fk}\` IN (${inPlaceholders})`;
+
+      const [rows] = await execute(sql, parentKeys);
+      const grouped = {};
+      for (const row of rows) {
+        const key = row.__pivot_fk;
+        delete row.__pivot_fk;
+        if (!grouped[key]) grouped[key] = new Collection();
+        grouped[key].push(RelatedModel._hydrate(row));
+      }
+      for (const inst of instances) {
+        const val = grouped[inst[lk]] ?? new Collection();
+        inst._relData = inst._relData ?? {};
+        inst._relData[this._currentRelationName] = val;
+        inst[this._currentRelationName] = val;
+      }
+    }
   }
 }
 
