@@ -25,6 +25,8 @@ export class Model {
   static guarded = [];
   static hidden = [];
   static casts = {};
+  static aliases = {};  // { dbColumn: 'responseKey' } e.g. { access_token: 'accessToken' }
+  static snakeCase = false; // opt-in: auto camelCase input keys → snake_case DB columns
 
   // Boot system 
 
@@ -70,9 +72,6 @@ export class Model {
     if (this.softDelete) {
       qb._setSoftDelete('deleted_at');
     }
-    if (this.hidden && this.hidden.length > 0) {
-      qb.hidden(this.hidden);
-    }
 
     return qb;
   }
@@ -89,6 +88,10 @@ export class Model {
     return proxy;
   }
 
+  static _normalizeInput(data) {
+    return this.snakeCase ? _keysToSnake(data) : data;
+  }
+
   static _resolveTable() {
     if (this.table) return this.table;
     return this.name
@@ -100,6 +103,11 @@ export class Model {
   static _hydrate(row) {
     if (!row) return null;
     const casted = _applyCasts(row, this.casts);
+    // Attach DB column values under alias keys so internal code can access both
+    const aliasMap = this.aliases ?? {};
+    for (const [dbCol, aliasKey] of Object.entries(aliasMap)) {
+      if (dbCol in casted) casted[aliasKey] = casted[dbCol];
+    }
     const instance = new this(casted);
     instance._exists = true;
     return instance;
@@ -240,7 +248,7 @@ export class Model {
   static async create(data) {
     this._bootIfNeeded();
     validateDataObject(data);
-    let filtered = { ...data };
+    let filtered = { ...this._normalizeInput(data) };
     if (this.fillable && this.fillable.length > 0) {
       filtered = applyFillable(filtered, this.fillable);
     }
@@ -317,7 +325,7 @@ export class Model {
     if (!Array.isArray(rows) || rows.length === 0) return [];
     const now = _now();
     const prepared = rows.map((r) => {
-      let filtered = { ...r };
+      let filtered = { ...this._normalizeInput(r) };
       if (this.fillable && this.fillable.length > 0) filtered = applyFillable(filtered, this.fillable);
       if (this.guarded && this.guarded.length > 0) filtered = applyGuarded(filtered, this.guarded);
       if (this.timestamps) { filtered.created_at = now; filtered.updated_at = now; }
@@ -331,7 +339,7 @@ export class Model {
     if (!Array.isArray(rows) || rows.length === 0) return 0;
     const now = _now();
     const prepared = rows.map((r) => {
-      let filtered = { ...r };
+      let filtered = { ...this._normalizeInput(r) };
       if (this.fillable && this.fillable.length > 0) filtered = applyFillable(filtered, this.fillable);
       if (this.guarded && this.guarded.length > 0) filtered = applyGuarded(filtered, this.guarded);
       if (this.timestamps) { filtered.created_at = now; filtered.updated_at = now; }
@@ -340,10 +348,42 @@ export class Model {
     return this._query().insertMany(prepared);
   }
 
+  static async upsertMany(rows, updateKeysOrOptions = []) {
+    if (!Array.isArray(rows) || rows.length === 0) return { affectedRows: 0 };
+    const now = _now();
+    const prepared = rows.map((r) => {
+      let filtered = { ...this._normalizeInput(r) };
+      if (this.fillable && this.fillable.length > 0) filtered = applyFillable(filtered, this.fillable);
+      if (this.guarded && this.guarded.length > 0) filtered = applyGuarded(filtered, this.guarded);
+      if (this.timestamps) {
+        if (!filtered.created_at) filtered.created_at = now;
+        filtered.updated_at = now;
+      }
+      return filtered;
+    });
+
+    // Resolve updateKeys from options
+    const firstRow = prepared[0];
+    const allKeys = Object.keys(firstRow);
+    let updateKeys;
+    if (Array.isArray(updateKeysOrOptions)) {
+      updateKeys = updateKeysOrOptions;
+      if (updateKeys.length === 0) updateKeys = allKeys.filter((k) => k !== this.primaryKey);
+      if (this.timestamps && !updateKeys.includes('updated_at')) updateKeys = [...updateKeys, 'updated_at'];
+    } else {
+      const { conflictFields = [], update } = updateKeysOrOptions;
+      updateKeys = (update && update.length > 0)
+        ? update
+        : allKeys.filter((k) => k !== this.primaryKey && !conflictFields.includes(k));
+      if (this.timestamps && !updateKeys.includes('updated_at')) updateKeys = [...updateKeys, 'updated_at'];
+    }
+    return this._query().upsertMany(prepared, updateKeys);
+  }
+
   static async upsert(data, updateKeysOrOptions = []) {
     this._bootIfNeeded();
     validateDataObject(data);
-    let filtered = { ...data };
+    let filtered = { ...this._normalizeInput(data) };
     if (this.fillable && this.fillable.length > 0) filtered = applyFillable(filtered, this.fillable);
     if (this.guarded && this.guarded.length > 0) filtered = applyGuarded(filtered, this.guarded);
     if (this.timestamps) {
@@ -444,6 +484,7 @@ export class Model {
       async update(data) { return qb.update(data); },
       async delete() { return qb.delete(); },
       async restore() { return qb.restore(); },
+      async upsertMany(rows, opts) { return qb.upsertMany(rows, opts); },
     };
   }
 
@@ -604,12 +645,23 @@ export class Model {
 
   toJSON() {
     const ModelClass = this.constructor;
+    const aliasMap = ModelClass.aliases ?? {};
+    const reverseAlias = Object.fromEntries(
+      Object.entries(aliasMap).map(([db, alias]) => [db, alias])
+    );
     const data = {};
     for (const [key, val] of Object.entries(this)) {
       if (key.startsWith('_')) continue;
+      // Skip DB column if an alias exists — will be output under alias key
+      if (reverseAlias[key]) continue;
       data[key] = _tryParseJson(val);
     }
+    // Output aliased fields under their alias keys
+    for (const [dbCol, aliasKey] of Object.entries(aliasMap)) {
+      if (dbCol in this) data[aliasKey] = _tryParseJson(this[dbCol]);
+    }
     const casted = _applyCasts(data, ModelClass.casts ?? {});
+    // hidden strips at serialization only — internal code still has full access
     return applyHidden(casted, ModelClass.hidden ?? []);
   }
 
@@ -719,4 +771,12 @@ function _snakeCase(str) {
     .replace(/([A-Z])/g, '_$1')
     .toLowerCase()
     .replace(/^_/, '');
+}
+
+function _keysToSnake(obj) {
+  const result = {};
+  for (const [k, v] of Object.entries(obj)) {
+    result[_snakeCase(k)] = v;
+  }
+  return result;
 }

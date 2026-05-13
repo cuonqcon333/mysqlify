@@ -522,6 +522,34 @@ export class QueryBuilder {
     return result.affectedRows;
   }
 
+  async upsertMany(rows, updateKeys) {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new MysqlifySecurityError('upsertMany requires a non-empty array of objects.');
+    }
+    if (!Array.isArray(updateKeys) || updateKeys.length === 0) {
+      throw new MysqlifySecurityError('upsertMany requires a non-empty updateKeys array.');
+    }
+    rows.forEach((r) => validateDataObject(r));
+
+    const keys = Object.keys(rows[0]);
+    if (keys.length === 0) throw new MysqlifySecurityError('No columns to upsert.');
+    validateIdentifiers(keys, 'column');
+    validateIdentifiers(updateKeys, 'column');
+
+    const cols = keys.map((k) => `\`${k}\``).join(', ');
+    const rowPlaceholders = keys.map(() => '?').join(', ');
+    const placeholders = rows.map(() => `(${rowPlaceholders})`).join(', ');
+    const values = rows.flatMap((r) => {
+      const serialized = serializeValues(r);
+      return keys.map((k) => serialized[k] ?? null);
+    });
+    const onDuplicate = updateKeys.map((k) => `\`${k}\` = VALUES(\`${k}\`)`).join(', ');
+
+    const sql = `INSERT INTO \`${this._table}\` (${cols}) VALUES ${placeholders} ON DUPLICATE KEY UPDATE ${onDuplicate}`;
+    const [result] = await execute(sql, values, this._conn);
+    return { affectedRows: result.affectedRows };
+  }
+
   async update(data) {
     validateDataObject(data);
     let filtered = data;

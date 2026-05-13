@@ -862,3 +862,123 @@ describe('Model.insertMany() + Model.upsert()', () => {
     expect(created).toBe(false);
   });
 });
+
+// ─── Hidden fix: internal access should work, output should strip ───────────
+
+class Secret extends Model {
+  static table = 'secrets';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+  static hidden = ['password', 'token'];
+}
+
+describe('Model hidden — internal access preserved, output stripped', () => {
+  test('instance retains hidden fields internally', () => {
+    const row = { id: 1, name: 'Alice', password: 'hash', token: 'abc' };
+    const instance = Secret._hydrate(row);
+    expect(instance.password).toBe('hash');
+    expect(instance.token).toBe('abc');
+  });
+
+  test('toJSON() strips hidden fields from output', () => {
+    const row = { id: 1, name: 'Alice', password: 'hash', token: 'abc' };
+    const instance = Secret._hydrate(row);
+    const json = instance.toJSON();
+    expect(json.password).toBeUndefined();
+    expect(json.token).toBeUndefined();
+    expect(json.name).toBe('Alice');
+  });
+});
+
+// ─── Aliases ────────────────────────────────────────────────────────────────
+
+class Token extends Model {
+  static table = 'tokens';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+  static aliases = { access_token: 'accessToken', refresh_token: 'refreshToken' };
+}
+
+describe('Model aliases', () => {
+  test('instance has both DB key and alias key', () => {
+    const row = { id: 1, access_token: 'aaa', refresh_token: 'bbb' };
+    const instance = Token._hydrate(row);
+    expect(instance.access_token).toBe('aaa');
+    expect(instance.accessToken).toBe('aaa');
+  });
+
+  test('toJSON() outputs alias key, not DB column key', () => {
+    const row = { id: 1, access_token: 'aaa', refresh_token: 'bbb' };
+    const instance = Token._hydrate(row);
+    const json = instance.toJSON();
+    expect(json.accessToken).toBe('aaa');
+    expect(json.refreshToken).toBe('bbb');
+    expect(json.access_token).toBeUndefined();
+    expect(json.refresh_token).toBeUndefined();
+  });
+});
+
+// ─── snakeCase opt-in ────────────────────────────────────────────────────────
+
+class Metric extends Model {
+  static table = 'metrics';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+  static snakeCase = true;
+}
+
+describe('Model snakeCase', () => {
+  test('create() converts camelCase keys to snake_case', async () => {
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 5, affectedRows: 1 }])
+      .mockResolvedValueOnce([[{ id: 5, max_tokens: 100, user_id: 1 }]]);
+    await Metric.create({ maxTokens: 100, userId: 1 });
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`max_tokens`');
+    expect(sql).toContain('`user_id`');
+    expect(params).toContain(100);
+  });
+});
+
+// ─── upsertMany ─────────────────────────────────────────────────────────────
+
+class Sync extends Model {
+  static table = 'sync_items';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+}
+
+describe('Model.upsertMany()', () => {
+  test('generates single batch INSERT ... ON DUPLICATE KEY UPDATE', async () => {
+    mockExecute.mockResolvedValue([{ affectedRows: 4 }]);
+    await Sync.upsertMany(
+      [
+        { provider: 'google', email: 'a@g.com', status: 'active' },
+        { provider: 'google', email: 'b@g.com', status: 'active' },
+      ],
+      ['status']
+    );
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('INSERT INTO `sync_items`');
+    expect(sql).toContain('VALUES (?, ?, ?), (?, ?, ?)');
+    expect(sql).toContain('ON DUPLICATE KEY UPDATE');
+    expect(sql).toContain('`status` = VALUES(`status`)');
+    expect(params).toHaveLength(6);
+  });
+
+  test('upsertMany with options object — auto exclude conflictFields', async () => {
+    mockExecute.mockResolvedValue([{ affectedRows: 2 }]);
+    await Sync.upsertMany(
+      [{ provider: 'google', email: 'a@g.com', status: 'active' }],
+      { conflictFields: ['provider', 'email'] }
+    );
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`status` = VALUES(`status`)');
+    expect(sql).not.toContain('`provider` = VALUES(`provider`)');
+    expect(sql).not.toContain('`email` = VALUES(`email`)');
+  });
+});

@@ -14,7 +14,10 @@ Fluent MySQL/MariaDB query builder for Node.js - async/await first, Eloquent-sty
 - **Lifecycle Hooks** - `boot()`, `creating/created`, `updating/updated`, `deleting/deleted`, `restoring/restored`
 - **Transactions** - `DB.transaction()` with auto-commit/rollback, Models participate too
 - **Dirty tracking** - `isDirty()`, `getDirty()`, `save()` only sends changed fields
-- **Batch operations** - `insertMany()`, `createMany()`, `upsert()`
+- **Batch operations** - `insertMany()`, `createMany()`, `upsert()`, `upsertMany()`
+- **Field aliases** - map DB columns to response keys (`access_token` → `accessToken`)
+- **Auto snake_case** - opt-in camelCase input → snake_case DB column conversion
+- **Date auto-convert** - `Date`, ISO strings auto-serialized to MySQL `DATETIME`
 - **Helpers** - `firstOrCreate()`, `updateOrCreate()`, `findOrFail()`, `findMany()`
 - **Migrations** - Laravel-style `up/down`, CLI runner
 - **Security built-in** - SQL injection prevention, XSS sanitization, mass assignment protection
@@ -244,6 +247,16 @@ const account = await Account.updateOrCreate(
 // Bulk update / delete
 await User.where('active', 0).update({ role: 'guest' });
 await User.where('role', 'guest').delete();
+
+// Batch upsert — single query, INSERT + ON DUPLICATE KEY UPDATE
+await OAuthAccount.upsertMany(
+  [
+    { provider: 'google', email: 'a@x.com', status: 'active' },
+    { provider: 'google', email: 'b@x.com', status: 'inactive' },
+  ],
+  { conflictFields: ['provider', 'email'] }  // auto-exclude from UPDATE list
+  // or explicit: ['status']
+);
 ```
 
 ### Instance API
@@ -310,6 +323,65 @@ static casts = {
 > JSON/array columns are also **auto-serialized** on insert/update - no need to `JSON.stringify()` manually.
 
 > `toJSON()` / `res.json()` auto-parses any string that looks like a JSON object or array - even without `casts`.
+
+### Hidden fields
+
+`hidden` fields are **only stripped at serialization** (`toJSON()` / `res.json()`). Internal code always has full access — identical to Laravel behavior.
+
+```js
+class User extends Model {
+  static hidden = ['password', 'token'];
+}
+
+const user = await User.find(1);
+console.log(user.password);      // 'hashed...' — accessible internally
+res.json(user);                   // { id: 1, name: 'Alice' } — password gone
+```
+
+### Field Aliases
+
+Map DB column names to different response keys without changing the schema.
+
+```js
+class OAuthAccount extends Model {
+  static aliases = {
+    access_token:  'accessToken',
+    refresh_token: 'refreshToken',
+    expires_at:    'expiresAt',
+  };
+}
+
+const account = await OAuthAccount.find(1);
+console.log(account.access_token);  // 'abc' — DB key still works internally
+console.log(account.accessToken);   // 'abc' — alias also works
+res.json(account);                  // { accessToken: 'abc', ... } — alias in output
+```
+
+### Auto snake_case (opt-in)
+
+Enable `snakeCase = true` on a Model to automatically convert camelCase input keys to snake_case DB columns on all write operations.
+
+```js
+class Metric extends Model {
+  static snakeCase = true;
+}
+
+// Input uses camelCase — DB column is max_tokens
+await Metric.create({ maxTokens: 100, userId: 1 });
+// SQL: INSERT INTO `metrics` (`max_tokens`, `user_id`) VALUES (?, ?)
+```
+
+### Date auto-serialization
+
+All write methods (`insert`, `update`, `upsert`, `upsertMany`, etc.) automatically convert date values to MySQL `DATETIME` format — no manual conversion needed.
+
+```js
+await Event.create({
+  starts_at: new Date(),                        // Date object ✅
+  expires_at: '2026-12-31T23:59:59.000Z',       // ISO string ✅
+  created_at: new Date('2026-01-01T00:00:00Z'), // ✅
+});
+```
 
 ### Soft Deletes
 
