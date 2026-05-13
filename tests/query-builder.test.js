@@ -402,3 +402,47 @@ describe('DB.listen()', () => {
     expect(mockClear).toHaveBeenCalled();
   });
 });
+
+// ─── Date / Datetime serialization ───────────────────────────────────────────
+
+describe('Date serialization — timezone-safe', () => {
+  // Helper: build expected local datetime string from a Date
+  function localDatetime(d) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return (
+      d.getFullYear() + '-' +
+      pad(d.getMonth() + 1) + '-' +
+      pad(d.getDate()) + ' ' +
+      pad(d.getHours()) + ':' +
+      pad(d.getMinutes()) + ':' +
+      pad(d.getSeconds())
+    );
+  }
+
+  test('Date object is serialized as local time, not UTC', async () => {
+    mockExecute.mockResolvedValue([{ insertId: 1, affectedRows: 1 }]);
+    const d = new Date('2026-05-13T23:35:57.887Z');
+    await DB.table('tokens').insert({ expires_at: d });
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params[0]).toBe(localDatetime(d));
+    // Must NOT be the UTC ISO string
+    expect(params[0]).not.toContain('T');
+    expect(params[0]).not.toContain('Z');
+  });
+
+  test('ISO string is serialized as local time, not raw UTC', async () => {
+    mockExecute.mockResolvedValue([{ insertId: 1, affectedRows: 1 }]);
+    const isoString = '2026-05-13T23:35:57.887Z';
+    const expected = localDatetime(new Date(isoString));
+    await DB.table('tokens').insert({ expires_at: isoString });
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params[0]).toBe(expected);
+  });
+
+  test('serialized format matches YYYY-MM-DD HH:mm:ss pattern', async () => {
+    mockExecute.mockResolvedValue([{ insertId: 1, affectedRows: 1 }]);
+    await DB.table('events').insert({ starts_at: new Date() });
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});

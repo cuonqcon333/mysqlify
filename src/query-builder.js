@@ -13,7 +13,18 @@ import {
 function toMysqlDatetime(val) {
   const d = val instanceof Date ? val : new Date(val);
   if (isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 19).replace('T', ' ');
+  // Use local time parts — mysql2 driver interprets DATETIME strings as local time.
+  // toISOString() returns UTC which causes timezone offset errors when MySQL server
+  // is not in UTC (e.g. storing '2026-05-13 23:35:57' when source was UTC+7 22:35:57).
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    d.getFullYear() + '-' +
+    pad(d.getMonth() + 1) + '-' +
+    pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' +
+    pad(d.getMinutes()) + ':' +
+    pad(d.getSeconds())
+  );
 }
 
 // Matches ISO 8601: 2026-05-13T02:04:24.604Z or 2026-05-13T02:04:24+07:00
