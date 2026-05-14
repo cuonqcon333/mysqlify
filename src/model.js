@@ -202,8 +202,17 @@ export class Model {
     instance._exists = true;
     // Make hidden fields non-enumerable: internal access (instance.password) still works,
     // but spread ({...instance}), Object.entries(), and JSON.stringify() won't expose them.
+    // Expand hidden to cover both DB col and alias key so either name works.
+    const aliasMapH = this.aliases ?? {};
+    const dbToAlias = aliasMapH;                                           // { access_token: 'accessToken' }
+    const aliasToDb = Object.fromEntries(Object.entries(aliasMapH).map(([db, a]) => [a, db]));
     const hiddenFields = this.hidden ?? [];
+    const hiddenExpanded = new Set(hiddenFields);
     for (const field of hiddenFields) {
+      if (dbToAlias[field]) hiddenExpanded.add(dbToAlias[field]);  // hide access_token → also hide accessToken
+      if (aliasToDb[field]) hiddenExpanded.add(aliasToDb[field]);  // hide accessToken → also hide access_token
+    }
+    for (const field of hiddenExpanded) {
       if (field in instance) {
         Object.defineProperty(instance, field, {
           value: instance[field],
@@ -845,8 +854,17 @@ export class Model {
       data[key] = typeof this[key] !== 'undefined' ? this[key] : null;
     }
     const casted = _applyCasts(data, ModelClass.casts ?? {});
+    // Expand hidden to cover both DB col and alias key names before stripping.
+    const aliasMapJ = ModelClass.aliases ?? {};
+    const aliasToDbJ = Object.fromEntries(Object.entries(aliasMapJ).map(([db, a]) => [a, db]));
+    const hiddenRaw = ModelClass.hidden ?? [];
+    const hiddenExpanded = new Set(hiddenRaw);
+    for (const field of hiddenRaw) {
+      if (aliasMapJ[field]) hiddenExpanded.add(aliasMapJ[field]);   // db col → alias
+      if (aliasToDbJ[field]) hiddenExpanded.add(aliasToDbJ[field]); // alias → db col
+    }
     // hidden strips at serialization only — internal code still has full access
-    return applyHidden(casted, ModelClass.hidden ?? []);
+    return applyHidden(casted, [...hiddenExpanded]);
   }
 
   getAttribute(key) {

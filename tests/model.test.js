@@ -1095,6 +1095,59 @@ describe('Model aliases', () => {
   });
 });
 
+// ─── Hidden × Aliases cross-direction ────────────────────────────────────────
+
+class SecretToken extends Model {
+  static table = 'secret_tokens';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+  static aliases = { access_token: 'accessToken', refresh_token: 'refreshToken' };
+}
+
+describe('hidden × aliases — both directions work', () => {
+  test('hiding DB col name (access_token) also hides alias key (accessToken) in toJSON()', () => {
+    class T1 extends SecretToken { static hidden = ['access_token']; }
+    const instance = T1._hydrate({ id: 1, access_token: 'tok', refresh_token: 'ref' });
+    const json = instance.toJSON();
+    expect(json.accessToken).toBeUndefined();
+    expect(json.access_token).toBeUndefined();
+    expect(json.refreshToken).toBe('ref');
+  });
+
+  test('hiding alias key (accessToken) also hides DB col (access_token) in toJSON()', () => {
+    class T2 extends SecretToken { static hidden = ['accessToken']; }
+    const instance = T2._hydrate({ id: 1, access_token: 'tok', refresh_token: 'ref' });
+    const json = instance.toJSON();
+    expect(json.accessToken).toBeUndefined();
+    expect(json.access_token).toBeUndefined();
+    expect(json.refreshToken).toBe('ref');
+  });
+
+  test('hiding DB col name also makes alias non-enumerable (spread safe)', () => {
+    class T3 extends SecretToken { static hidden = ['access_token']; }
+    const instance = T3._hydrate({ id: 1, access_token: 'tok', refresh_token: 'ref' });
+    const spread = { ...instance };
+    expect(spread.accessToken).toBeUndefined();
+    expect(spread.access_token).toBeUndefined();
+  });
+
+  test('hiding alias key also makes DB col non-enumerable (spread safe)', () => {
+    class T4 extends SecretToken { static hidden = ['accessToken']; }
+    const instance = T4._hydrate({ id: 1, access_token: 'tok', refresh_token: 'ref' });
+    const spread = { ...instance };
+    expect(spread.accessToken).toBeUndefined();
+    expect(spread.access_token).toBeUndefined();
+  });
+
+  test('internal access still works regardless of which name was used in hidden', () => {
+    class T5 extends SecretToken { static hidden = ['access_token']; }
+    const instance = T5._hydrate({ id: 1, access_token: 'tok' });
+    expect(instance.access_token).toBe('tok');
+    expect(instance.accessToken).toBe('tok');
+  });
+});
+
 // ─── snakeCase opt-in ────────────────────────────────────────────────────────
 
 class Metric extends Model {
