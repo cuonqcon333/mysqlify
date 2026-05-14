@@ -274,6 +274,19 @@ describe('Model instance.save()', () => {
     expect(sql).toContain('UPDATE `users`');
     expect(params).toContain('Updated');
   });
+
+  test('UPDATE includes hidden (non-enumerable) fields in dirty detection', async () => {
+    mockExecute.mockResolvedValue([{ affectedRows: 1 }]);
+
+    const user = Secret._hydrate({ id: 5, name: 'Alice', password: 'oldHash', token: 'old' });
+    user._exists = true;
+    user.password = 'newHash'; // hidden field
+    await user.save();
+
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('UPDATE `secrets`');
+    expect(params).toContain('newHash');
+  });
 });
 
 describe('Model instance.destroy()', () => {

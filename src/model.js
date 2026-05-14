@@ -785,8 +785,11 @@ export class Model {
 
   getDirty() {
     const dirty = {};
-    for (const [key, val] of Object.entries(this)) {
+    // Use Reflect.ownKeys to include non-enumerable (hidden) fields — Object.entries skips them
+    for (const key of Reflect.ownKeys(this)) {
+      if (typeof key !== 'string') continue; // skip symbols
       if (key.startsWith('_')) continue;
+      const val = this[key];
       if (!(key in this._original) || this._original[key] !== val) {
         dirty[key] = val;
       }
