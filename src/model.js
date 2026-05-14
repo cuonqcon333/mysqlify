@@ -200,6 +200,19 @@ export class Model {
     }
     const instance = new this(casted);
     instance._exists = true;
+    // Make hidden fields non-enumerable: internal access (instance.password) still works,
+    // but spread ({...instance}), Object.entries(), and JSON.stringify() won't expose them.
+    const hiddenFields = this.hidden ?? [];
+    for (const field of hiddenFields) {
+      if (field in instance) {
+        Object.defineProperty(instance, field, {
+          value: instance[field],
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+      }
+    }
     return instance;
   }
 

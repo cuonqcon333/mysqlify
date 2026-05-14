@@ -1031,6 +1031,39 @@ describe('Model hidden — internal access preserved, output stripped', () => {
     expect(json.token).toBeUndefined();
     expect(json.name).toBe('Alice');
   });
+
+  test('hidden fields are non-enumerable — spread operator does not leak them', () => {
+    const row = { id: 1, name: 'Alice', password: 'hash', token: 'abc' };
+    const instance = Secret._hydrate(row);
+    const spread = { ...instance };
+    expect(spread.password).toBeUndefined();
+    expect(spread.token).toBeUndefined();
+    expect(spread.name).toBe('Alice');
+  });
+
+  test('hidden fields are non-enumerable — Object.entries does not leak them', () => {
+    const row = { id: 1, name: 'Alice', password: 'hash', token: 'abc' };
+    const instance = Secret._hydrate(row);
+    const keys = Object.entries(instance).map(([k]) => k).filter(k => !k.startsWith('_'));
+    expect(keys).not.toContain('password');
+    expect(keys).not.toContain('token');
+  });
+
+  test('hidden fields still accessible internally via direct property access', () => {
+    const row = { id: 1, name: 'Alice', password: 'hash', token: 'abc' };
+    const instance = Secret._hydrate(row);
+    expect(instance.password).toBe('hash');
+    expect(instance.token).toBe('abc');
+  });
+
+  test('JSON.stringify does not leak hidden fields', () => {
+    const row = { id: 1, name: 'Alice', password: 'hash', token: 'abc' };
+    const instance = Secret._hydrate(row);
+    const parsed = JSON.parse(JSON.stringify(instance));
+    expect(parsed.password).toBeUndefined();
+    expect(parsed.token).toBeUndefined();
+    expect(parsed.name).toBe('Alice');
+  });
 });
 
 // ─── Aliases ────────────────────────────────────────────────────────────────
