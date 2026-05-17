@@ -15,7 +15,7 @@ class ColumnDefinition {
     this._index = false;
     this._primary = false;
     this._autoIncrement = false;
-    this._references = null;
+    this._references = null;  // { column, table, onDelete, onUpdate }
     this._comment = null;
   }
 
@@ -51,8 +51,38 @@ class ColumnDefinition {
 
   references(column, onTable) {
     validateIdentifier(column, 'column');
-    validateIdentifier(onTable, 'table');
-    this._references = { column, onTable };
+    if (onTable) validateIdentifier(onTable, 'table');
+    this._references = {
+      column,
+      table: onTable ?? null,
+      onDelete: 'RESTRICT',
+      onUpdate: 'RESTRICT',
+    };
+    return this;
+  }
+
+  inTable(tableName) {
+    validateIdentifier(tableName, 'table');
+    if (!this._references) {
+      throw new Error('.inTable() must be called after .references()');
+    }
+    this._references.table = tableName;
+    return this;
+  }
+
+  onDelete(action) {
+    if (!this._references) {
+      throw new Error('.onDelete() must be called after .references()');
+    }
+    this._references.onDelete = action.toUpperCase();
+    return this;
+  }
+
+  onUpdate(action) {
+    if (!this._references) {
+      throw new Error('.onUpdate() must be called after .references()');
+    }
+    this._references.onUpdate = action.toUpperCase();
     return this;
   }
 
@@ -295,6 +325,17 @@ class Blueprint {
       parts.push(`  KEY \`${idxName}\` (\`${idx.join('`, `')}\`)`);
     }
 
+    // Foreign keys from column-level .references().inTable()
+    for (const col of this._columns) {
+      if (col._references && col._references.table) {
+        const fkName = `${this._tableName}_${col._name}_foreign`;
+        parts.push(
+          `  CONSTRAINT \`${fkName}\` FOREIGN KEY (\`${col._name}\`) REFERENCES \`${col._references.table}\` (\`${col._references.column}\`) ON DELETE ${col._references.onDelete} ON UPDATE ${col._references.onUpdate}`
+        );
+      }
+    }
+
+    // Foreign keys from explicit .foreign() calls
     for (const fk of this._foreignKeys) {
       if (fk.references && fk.on) {
         const fkName = `${this._tableName}_${fk.column}_foreign`;
