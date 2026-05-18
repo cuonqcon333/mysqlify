@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.2] - 2026-05-18
+
+### Added
+- **Comprehensive Technical Documentation:** Expanded `README.md` to perfectly match source-of-truth functionalities, adding detailed sections for `rightJoin()`, `from()`, explicit `Collection` methods (`unique()`, `chunk()`, `groupBy()`, `keyBy()`), constrained relational constraints, lazy eager loading `load()`, and clear compatibility thresholds.
+
 ## [0.5.1] - 2026-05-18
 
 ### Fixed
