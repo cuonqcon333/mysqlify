@@ -1463,6 +1463,32 @@ describe('Eager Loading with()', () => {
     expect(user.posts.length).toBe(2);
   });
 
+  test('Model wrapper: chain multiple joins', async () => {
+    mockExecute.mockResolvedValue([[{ id: 1, name: 'Alice', post_title: 'Hello' }]]);
+    
+    const result = await User
+      .join('posts', 'users.id', 'posts.user_id')
+      .join('comments', 'posts.id', 'comments.post_id')
+      .get();
+    
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).toContain('INNER JOIN `posts`');
+    expect(sql).toContain('INNER JOIN `comments`');
+    expect(result).toHaveLength(1);
+  });
+
+  test('Model wrapper: select with table.* and AS alias', async () => {
+    mockExecute.mockResolvedValue([[{ id: 1, name: 'Alice', post_title: 'Hello' }]]);
+    
+    await User
+      .select('users.*', 'posts.title AS post_title')
+      .join('posts', 'users.id', 'posts.user_id')
+      .get();
+    
+    const [sql] = mockExecute.mock.calls[0];
+    expect(sql).toContain('SELECT users.*, posts.title AS post_title');
+  });
+
   test('hasMany: empty parents get empty Collection', async () => {
     mockExecute
       .mockResolvedValueOnce([[{ id: 2, name: 'Bob' }]])

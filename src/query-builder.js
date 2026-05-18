@@ -96,10 +96,36 @@ export class QueryBuilder {
     if (columns.length === 1 && Array.isArray(columns[0])) {
       columns = columns[0];
     }
-    validateIdentifiers(
-      columns.filter((c) => c !== '*' && !c.includes('(')),
-      'column'
-    );
+    // Validate columns, supporting 'table.*', 'column AS alias', and functions
+    for (const col of columns) {
+      if (col === '*') continue;  // SELECT *
+      if (col.includes('(')) continue;  // Function call like COUNT(*)
+      
+      // Handle 'column AS alias' or 'column as alias'
+      const asMatch = col.match(/^(.+?)\s+(?:AS|as)\s+(.+)$/);
+      if (asMatch) {
+        const baseCol = asMatch[1].trim();
+        // Validate base column (e.g. 'users.id' or 'id')
+        if (baseCol !== '*' && !baseCol.endsWith('.*')) {
+          validateIdentifier(baseCol, 'column');
+        } else if (baseCol.endsWith('.*')) {
+          // Validate 'table.*' → validate 'table' part
+          const tablePart = baseCol.slice(0, -2);
+          validateIdentifier(tablePart, 'table');
+        }
+        continue;
+      }
+      
+      // Handle 'table.*'
+      if (col.endsWith('.*')) {
+        const tablePart = col.slice(0, -2);
+        validateIdentifier(tablePart, 'table');
+        continue;
+      }
+      
+      // Regular column
+      validateIdentifier(col, 'column');
+    }
     this._selects.push(...columns);
     return this;
   }
@@ -268,7 +294,15 @@ export class QueryBuilder {
     const params = [];
 
     for (const j of this._joins) {
-      sql += ` ${j.type} JOIN \`${j.table}\` ON \`${j.col1}\` = \`${j.col2}\``;
+      // Wrap table.column properly: users.id → `users`.`id`
+      const wrapCol = (col) => {
+        if (col.includes('.')) {
+          const parts = col.split('.');
+          return parts.map(p => `\`${p}\``).join('.');
+        }
+        return `\`${col}\``;
+      };
+      sql += ` ${j.type} JOIN \`${j.table}\` ON ${wrapCol(j.col1)} = ${wrapCol(j.col2)}`;
     }
 
     const { whereClause, whereParams } = this._buildWhere();

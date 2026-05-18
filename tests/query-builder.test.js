@@ -86,7 +86,7 @@ describe('QueryBuilder — SQL generation', () => {
       .table('posts')
       .join('users', 'posts.user_id', 'users.id');
     const { sql } = qb._buildSelect();
-    expect(sql).toContain('INNER JOIN `users` ON `posts.user_id` = `users.id`');
+    expect(sql).toContain('INNER JOIN `users` ON `posts`.`user_id` = `users`.`id`');
   });
 
   test('LEFT JOIN', () => {
@@ -444,5 +444,77 @@ describe('Date serialization — timezone-safe', () => {
     await DB.table('events').insert({ starts_at: new Date() });
     const [, params] = mockExecute.mock.calls[0];
     expect(params[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+// ─── SELECT enhancements: table.*, AS alias ─────────────────────────────────
+
+describe('QueryBuilder — SELECT table.* and AS alias', () => {
+  test('SELECT table.* syntax is allowed', () => {
+    const qb = new QueryBuilder().table('users').select('users.*', 'posts.title');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('SELECT users.*, posts.title');
+  });
+
+  test('SELECT column AS alias syntax is allowed', () => {
+    const qb = new QueryBuilder().table('users').select('id AS user_id', 'name');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('SELECT id AS user_id, name');
+  });
+
+  test('SELECT with lowercase as is allowed', () => {
+    const qb = new QueryBuilder().table('users').select('email as user_email');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('SELECT email as user_email');
+  });
+
+  test('SELECT table.column AS alias is allowed', () => {
+    const qb = new QueryBuilder().table('users').select('users.id AS user_id', 'users.name');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('SELECT users.id AS user_id, users.name');
+  });
+
+  test('Mixed: table.*, column AS alias, regular column', () => {
+    const qb = new QueryBuilder()
+      .table('users')
+      .select('users.*', 'posts.title AS post_title', 'posts.id');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('SELECT users.*, posts.title AS post_title, posts.id');
+  });
+});
+
+// ─── JOIN chaining ──────────────────────────────────────────────────────────
+
+describe('QueryBuilder — Multiple JOIN chaining', () => {
+  test('chain multiple join() calls', () => {
+    const qb = new QueryBuilder()
+      .table('users')
+      .join('posts', 'users.id', 'posts.user_id')
+      .join('comments', 'posts.id', 'comments.post_id');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('INNER JOIN `posts` ON `users`.`id` = `posts`.`user_id`');
+    expect(sql).toContain('INNER JOIN `comments` ON `posts`.`id` = `comments`.`post_id`');
+  });
+
+  test('chain leftJoin() and join()', () => {
+    const qb = new QueryBuilder()
+      .table('users')
+      .leftJoin('profiles', 'users.id', 'profiles.user_id')
+      .join('posts', 'users.id', 'posts.user_id');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('LEFT JOIN `profiles`');
+    expect(sql).toContain('INNER JOIN `posts`');
+  });
+
+  test('chain 3+ joins', () => {
+    const qb = new QueryBuilder()
+      .table('a')
+      .join('b', 'a.id', 'b.a_id')
+      .join('c', 'b.id', 'c.b_id')
+      .join('d', 'c.id', 'd.c_id');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('INNER JOIN `b`');
+    expect(sql).toContain('INNER JOIN `c`');
+    expect(sql).toContain('INNER JOIN `d`');
   });
 });
