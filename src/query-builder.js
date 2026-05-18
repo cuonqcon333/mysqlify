@@ -54,8 +54,8 @@ export class QueryBuilder {
   constructor() {
     this._table = null;
     this._selects = [];
-    this._wheres = [];
-    this._orWheres = [];
+    this._wheres = [];  // unified: { col, op, val, type: 'AND'|'OR', raw?, rawBindings? }
+    this._orWheres = [];  // kept for backward compat during _clone — but _buildWhere uses _wheres only
     this._joins = [];
     this._orderBys = [];
     this._groupBys = [];
@@ -134,19 +134,20 @@ export class QueryBuilder {
 
   where(column, operatorOrValue, value) {
     const config = getConfig();
-    if (this._wheres.length + this._orWheres.length >= config.maxConditions) {
+    if (this._wheres.length >= config.maxConditions) {
       throw new MysqlifySecurityError(
         `Query complexity limit reached (maxConditions: ${config.maxConditions}).`
       );
     }
     const { col, op, val } = this._parseWhere(column, operatorOrValue, value);
-    this._wheres.push({ col, op, val });
+    this._wheres.push({ col, op, val, type: 'AND' });
     return this;
   }
 
   orWhere(column, operatorOrValue, value) {
     const { col, op, val } = this._parseWhere(column, operatorOrValue, value);
-    this._orWheres.push({ col, op, val, type: 'OR' });
+    // Store in _wheres (not _orWheres) to preserve call-order boolean semantics
+    this._wheres.push({ col, op, val, type: 'OR' });
     return this;
   }
 
@@ -155,7 +156,7 @@ export class QueryBuilder {
     if (!Array.isArray(values) || values.length === 0) {
       throw new MysqlifySecurityError('whereIn requires a non-empty array of values.');
     }
-    this._wheres.push({ col: column, op: 'IN', val: values });
+    this._wheres.push({ col: column, op: 'IN', val: values, type: 'AND' });
     return this;
   }
 
@@ -164,30 +165,30 @@ export class QueryBuilder {
     if (!Array.isArray(values) || values.length === 0) {
       throw new MysqlifySecurityError('whereNotIn requires a non-empty array of values.');
     }
-    this._wheres.push({ col: column, op: 'NOT IN', val: values });
+    this._wheres.push({ col: column, op: 'NOT IN', val: values, type: 'AND' });
     return this;
   }
 
   whereNull(column) {
     validateIdentifier(column, 'column');
-    this._wheres.push({ col: column, op: 'IS NULL', val: null });
+    this._wheres.push({ col: column, op: 'IS NULL', val: null, type: 'AND' });
     return this;
   }
 
   whereNotNull(column) {
     validateIdentifier(column, 'column');
-    this._wheres.push({ col: column, op: 'IS NOT NULL', val: null });
+    this._wheres.push({ col: column, op: 'IS NOT NULL', val: null, type: 'AND' });
     return this;
   }
 
   whereBetween(column, [min, max]) {
     validateIdentifier(column, 'column');
-    this._wheres.push({ col: column, op: 'BETWEEN', val: [min, max] });
+    this._wheres.push({ col: column, op: 'BETWEEN', val: [min, max], type: 'AND' });
     return this;
   }
 
   whereRaw(expression, bindings = []) {
-    this._wheres.push({ raw: expression, rawBindings: bindings, op: 'RAW' });
+    this._wheres.push({ raw: expression, rawBindings: bindings, op: 'RAW', type: 'AND' });
     return this;
   }
 
@@ -312,7 +313,9 @@ export class QueryBuilder {
     }
 
     if (this._groupBys.length > 0) {
-      sql += ` GROUP BY ${this._groupBys.map((c) => `\`${c}\``).join(', ')}`;
+      // Split dotted identifiers: users.name → `users`.`name`
+      const wrapIdent = (c) => c.includes('.') ? c.split('.').map((p) => `\`${p}\``).join('.') : `\`${c}\``;
+      sql += ` GROUP BY ${this._groupBys.map(wrapIdent).join(', ')}`;
     }
 
     if (this._havings.length > 0) {
@@ -322,7 +325,9 @@ export class QueryBuilder {
     }
 
     if (this._orderBys.length > 0) {
-      sql += ` ORDER BY ${this._orderBys.map((o) => `\`${o.column}\` ${o.dir}`).join(', ')}`;
+      // Split dotted identifiers: users.name → `users`.`name`
+      const wrapIdent = (c) => c.includes('.') ? c.split('.').map((p) => `\`${p}\``).join('.') : `\`${c}\``;
+      sql += ` ORDER BY ${this._orderBys.map((o) => `${wrapIdent(o.column)} ${o.dir}`).join(', ')}`;
     }
 
     if (this._limitVal !== null) {
@@ -337,14 +342,8 @@ export class QueryBuilder {
   }
 
   _buildWhere() {
-    const all = [];
-
-    for (const w of this._wheres) {
-      all.push({ ...w, type: 'AND' });
-    }
-    for (const w of this._orWheres) {
-      all.push(w);
-    }
+    // _wheres already contains type:'AND'|'OR' in call order — no separate _orWheres merge needed
+    const all = [...this._wheres];
 
     if (this._softDeleteCol && !this._includeTrashed && !this._onlyTrashed) {
       all.push({ col: this._softDeleteCol, op: 'IS NULL', val: null, type: 'AND' });
@@ -654,10 +653,13 @@ export class QueryBuilder {
 
   async restore() {
     if (!this._softDeleteCol) return 0;
-    return this._clone()
-      .table(this._table)
-      ._copyFilters(this)
-      .update({ [this._softDeleteCol]: null });
+    // Build a fresh builder that targets trashed rows only — bypass deleted_at IS NULL filter
+    const qb = new QueryBuilder();
+    qb._table = this._table;
+    qb._wheres = [...this._wheres];
+    qb._conn = this._conn;
+    // Do NOT copy softDeleteCol — restore issues a plain UPDATE without the soft-delete WHERE filter
+    return qb.update({ [this._softDeleteCol]: null });
   }
 
   async increment(column, amount = 1) {
@@ -707,7 +709,7 @@ export class QueryBuilder {
     qb._table = this._table;
     qb._selects = [...this._selects];
     qb._wheres = [...this._wheres];
-    qb._orWheres = [...this._orWheres];
+    qb._orWheres = [...this._orWheres];  // kept for compat — _buildWhere uses _wheres only
     qb._joins = [...this._joins];
     qb._orderBys = [...this._orderBys];
     qb._groupBys = [...this._groupBys];
@@ -719,6 +721,9 @@ export class QueryBuilder {
     qb._hidden = this._hidden;
     qb._sanitize = this._sanitize;
     qb._softDeleteCol = this._softDeleteCol;
+    qb._conn = this._conn;                    // FIX: preserve connection (for transactions)
+    qb._includeTrashed = this._includeTrashed; // FIX: preserve withTrashed flag
+    qb._onlyTrashed = this._onlyTrashed;       // FIX: preserve onlyTrashed flag
     return qb;
   }
 

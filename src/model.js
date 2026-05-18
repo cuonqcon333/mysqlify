@@ -96,12 +96,22 @@ export class Model {
   }
 
   constructor(attributes = {}) {
-    this._original = { ...attributes };
-    this._attributes = { ...attributes };
+    this._original = {};
+    this._attributes = {};
     this._exists = false;
-    // Use mutators if defined (set <Key>(v) setter on prototype)
+    // Bypass mutators: assign raw DB values directly into the instance property bag
+    // and into _attributes/_original without going through prototype setters.
+    // This mirrors Eloquent's hydration contract: mutators run on set/save, NOT on hydrate.
     for (const [key, val] of Object.entries(attributes)) {
-      this[key] = val;
+      // Use defineProperty to bypass any setter defined on the prototype for this key
+      Object.defineProperty(this, key, {
+        value: val,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+      this._attributes[key] = val;
+      this._original[key] = val;
     }
   }
 
@@ -171,9 +181,9 @@ export class Model {
     const proxy = Object.create(ModelClass);
     proxy._conn = conn;
     proxy._query = (opts = null) => ModelClass._query({ conn, ...(opts ?? {}) });
-    proxy._hydrate = (row) => ModelClass._hydrate(row);
-    proxy._hydrateAll = (rows) => ModelClass._hydrateAll(rows);
-    proxy._wrapQueryBuilder = (qb) => ModelClass._wrapQueryBuilder(qb);
+    proxy._hydrate = function(row) { return ModelClass._hydrate.call(this, row); };
+    proxy._hydrateAll = function(rows) { return ModelClass._hydrateAll.call(this, rows); };
+    proxy._wrapQueryBuilder = function(qb) { return ModelClass._wrapQueryBuilder.call(this, qb); };
     proxy._resolveTable = () => ModelClass._resolveTable();
     return proxy;
   }
@@ -193,24 +203,40 @@ export class Model {
   static _hydrate(row) {
     if (!row) return null;
     const casted = _applyCasts(row, this.casts);
-    // Attach DB column values under alias keys so internal code can access both
     const aliasMap = this.aliases ?? {};
-    for (const [dbCol, aliasKey] of Object.entries(aliasMap)) {
-      if (dbCol in casted) casted[aliasKey] = casted[dbCol];
+    const ModelClass = typeof this === 'function' ? this : Object.getPrototypeOf(this);
+    const instance = new ModelClass(casted);
+    if (this._conn) {
+      Object.defineProperty(instance, 'constructor', {
+        value: this, writable: true, configurable: true, enumerable: false
+      });
     }
-    const instance = new this(casted);
+    // Inject alias keys as live proxies: reading/writing accessToken round-trips to access_token
+    for (const [dbCol, aliasKey] of Object.entries(aliasMap)) {
+      if (!(dbCol in casted)) continue;
+      const ModelClass = this;
+      Object.defineProperty(instance, aliasKey, {
+        get() { return this._attributes[dbCol]; },
+        set(v) {
+          this._attributes[dbCol] = v;
+          // Also update the actual DB-col property on the instance so getDirty() picks it up
+          Object.defineProperty(this, dbCol, {
+            value: v, writable: true, enumerable: true, configurable: true,
+          });
+        },
+        enumerable: false,  // alias key is NOT enumerable — only DB col appears in Object.entries
+        configurable: true,
+      });
+    }
     instance._exists = true;
-    // Make hidden fields non-enumerable: internal access (instance.password) still works,
-    // but spread ({...instance}), Object.entries(), and JSON.stringify() won't expose them.
-    // Expand hidden to cover both DB col and alias key so either name works.
-    const aliasMapH = this.aliases ?? {};
-    const dbToAlias = aliasMapH;                                           // { access_token: 'accessToken' }
-    const aliasToDb = Object.fromEntries(Object.entries(aliasMapH).map(([db, a]) => [a, db]));
+    // Make hidden fields non-enumerable
+    const dbToAlias = aliasMap;
+    const aliasToDb = Object.fromEntries(Object.entries(aliasMap).map(([db, a]) => [a, db]));
     const hiddenFields = this.hidden ?? [];
     const hiddenExpanded = new Set(hiddenFields);
     for (const field of hiddenFields) {
-      if (dbToAlias[field]) hiddenExpanded.add(dbToAlias[field]);  // hide access_token → also hide accessToken
-      if (aliasToDb[field]) hiddenExpanded.add(aliasToDb[field]);  // hide accessToken → also hide access_token
+      if (dbToAlias[field]) hiddenExpanded.add(dbToAlias[field]);
+      if (aliasToDb[field]) hiddenExpanded.add(aliasToDb[field]);
     }
     for (const field of hiddenExpanded) {
       if (field in instance) {
@@ -226,7 +252,8 @@ export class Model {
   }
 
   static _hydrateAll(rows) {
-    return rows.map((row) => this._hydrate(row));
+    if (!rows || rows.length === 0) return new Collection();
+    return new Collection(rows.map((row) => this._hydrate(row)));
   }
 
   // Static Query API 
@@ -360,39 +387,62 @@ export class Model {
   static async create(data) {
     this._bootIfNeeded();
     validateDataObject(data);
-    let filtered = { ...this._normalizeInput(data) };
+    // Apply fillable/guarded to user payload only (untrusted)
+    const normalized = this._normalizeInput(data);
+    const explicitPk = normalized[this.primaryKey];  // Preserve explicit PK
+    let filtered = { ...normalized };
     if (this.fillable && this.fillable.length > 0) {
       filtered = applyFillable(filtered, this.fillable);
     }
     if (this.guarded && this.guarded.length > 0) {
       filtered = applyGuarded(filtered, this.guarded);
+    }
+    // Restore explicit PK if provided (PK always allowed)
+    if (explicitPk !== undefined) {
+      filtered[this.primaryKey] = explicitPk;
     }
 
     const instance = new this(filtered);
+    if (await this._fire('saving', instance) === false) return null;
     if (await this._fire('creating', instance) === false) return null;
 
-    // re-sync filtered from instance so hook mutations are included
-    filtered = {};
-    for (const [k, v] of Object.entries(instance)) {
-      if (!k.startsWith('_')) filtered[k] = v;
-    }
-    if (this.fillable && this.fillable.length > 0) {
-      filtered = applyFillable(filtered, this.fillable);
-    }
-    if (this.guarded && this.guarded.length > 0) {
-      filtered = applyGuarded(filtered, this.guarded);
-    }
-
+    // Add timestamps to instance before extracting insert data
     if (this.timestamps) {
       const now = _now();
-      filtered.created_at = now;
-      filtered.updated_at = now;
+      instance.created_at = now;
+      instance.updated_at = now;
     }
 
-    const insertId = await this._query().insert(filtered);
-    const created = await this.find(insertId);
+    // After hook: instance state is trusted, extract for INSERT
+    const insertData = this._prepareInsertData(instance);
+    const insertId = await this._query().insert(insertData);
+    
+    // Source of truth: instance PK > insertId
+    const finalPk = instance[this.primaryKey] ?? insertId;
+    if (!instance[this.primaryKey]) {
+      instance[this.primaryKey] = finalPk;
+    }
+    instance._exists = true;
+    instance._original = { ...instance };
+
+    // Refetch to apply casts and DB defaults
+    const created = await this.find(finalPk);
     await this._fire('created', created);
+    await this._fire('saved', created);
     return created;
+  }
+
+  /**
+   * Extract data for INSERT from instance, bypassing fillable/guarded.
+   * Hook-set attributes are trusted internal state.
+   */
+  static _prepareInsertData(instance) {
+    const data = {};
+    for (const k of Reflect.ownKeys(instance)) {
+      if (typeof k !== 'string' || k.startsWith('_')) continue;
+      data[k] = instance[k];
+    }
+    return data;
   }
 
   static async findOrFail(id) {
@@ -702,17 +752,22 @@ export class Model {
     }
 
     if (!this._exists || pkVal === undefined || pkVal === null) {
-      if (ModelClass.fillable && ModelClass.fillable.length > 0) {
-        data = applyFillable(data, ModelClass.fillable);
-      }
-      if (ModelClass.guarded && ModelClass.guarded.length > 0) {
-        data = applyGuarded(data, ModelClass.guarded);
-      }
+      if (await ModelClass._fire('saving', this) === false) return this;
       if (await ModelClass._fire('creating', this) === false) return this;
-      const insertId = await ModelClass._query().insert(data);
-      this[pk] = insertId;
+      
+      // After hook: instance state is trusted, extract for INSERT
+      const insertData = ModelClass._prepareInsertData(this);
+      const insertId = await ModelClass._query().insert(insertData);
+      
+      // Source of truth: instance PK > insertId
+      const finalPk = this[pk] ?? insertId;
+      if (!this[pk]) {
+        this[pk] = finalPk;
+      }
       this._exists = true;
+      this._original = { ...this };
       await ModelClass._fire('created', this);
+      await ModelClass._fire('saved', this);
       return this;
     }
 
@@ -731,10 +786,14 @@ export class Model {
     }
     if (Object.keys(dirty).length === 0) return this;
 
+    if (await ModelClass._fire('saving', this) === false) return this;
     if (await ModelClass._fire('updating', this) === false) return this;
     await ModelClass._query().where(pk, pkVal).update(dirty);
+    // Sync _attributes and _original after UPDATE
+    Object.assign(this._attributes, dirty);
     this._original = { ...this._original, ...dirty };
     await ModelClass._fire('updated', this);
+    await ModelClass._fire('saved', this);
     return this;
   }
 
@@ -757,10 +816,15 @@ export class Model {
     if (ModelClass.timestamps) {
       filtered.updated_at = _now();
     }
+    if (await ModelClass._fire('saving', this) === false) return this;
     if (await ModelClass._fire('updating', this) === false) return this;
     await ModelClass._query().where(pk, pkVal).update(filtered);
+    // Sync instance properties AND _attributes so getAttribute/getDirty see fresh state
     Object.assign(this, filtered);
+    Object.assign(this._attributes, filtered);
+    this._original = { ...this._original, ...filtered };
     await ModelClass._fire('updated', this);
+    await ModelClass._fire('saved', this);
     return this;
   }
 
@@ -775,7 +839,12 @@ export class Model {
     const row = await ModelClass._query().where(pk, pkVal).first();
     if (!row) return null;
     const casted = _applyCasts(row, ModelClass.casts ?? {});
-    Object.assign(this, casted);
+    // Bypass mutators on reload — same invariant as constructor
+    for (const [key, val] of Object.entries(casted)) {
+      Object.defineProperty(this, key, {
+        value: val, writable: true, enumerable: true, configurable: true,
+      });
+    }
     this._original = { ...casted };
     this._attributes = { ...casted };
     return this;
@@ -787,11 +856,15 @@ export class Model {
   }
 
   getDirty() {
+    const ModelClass = this.constructor;
+    // Alias keys are virtual proxies — skip them, dirty is tracked via DB col
+    const aliasKeys = new Set(Object.values(ModelClass.aliases ?? {}));
     const dirty = {};
     // Use Reflect.ownKeys to include non-enumerable (hidden) fields — Object.entries skips them
     for (const key of Reflect.ownKeys(this)) {
       if (typeof key !== 'string') continue; // skip symbols
       if (key.startsWith('_')) continue;
+      if (aliasKeys.has(key)) continue;      // skip alias proxy keys
       const val = this[key];
       if (!(key in this._original) || this._original[key] !== val) {
         dirty[key] = val;
@@ -960,13 +1033,15 @@ export class Model {
     return async (instance) => {
       const pk = instance[ModelClass.primaryKey];
       const relatedTable = RelatedModel._resolveTable();
+      const conn = instance?.constructor?._conn;
       const sql = `
         SELECT \`${relatedTable}\`.* FROM \`${relatedTable}\`
         INNER JOIN \`${pivotTable}\` ON \`${pivotTable}\`.\`${relatedFkCol}\` = \`${relatedTable}\`.\`${RelatedModel.primaryKey}\`
         WHERE \`${pivotTable}\`.\`${localFkCol}\` = ?
       `;
-      const [rows] = await execute(sql, [pk]);
-      return RelatedModel._hydrateAll(rows);
+      const [rows] = await execute(sql, [pk], conn);
+      const RM = conn ? RelatedModel._withConnection(conn) : RelatedModel;
+      return RM._hydrateAll(rows);
     };
   }
 
@@ -1034,15 +1109,17 @@ export class Model {
         const parent = relationName.slice(0, dotIdx);
         const nested = relationName.slice(dotIdx + 1);
         // load parent first (if not already loaded)
-        if (!instances[0]?.[parent]) {
+        if (!instances[0]?._relData || instances[0]._relData[parent] === undefined) {
           await this._loadRelations(instances, { [parent]: null });
         }
         // collect nested instances
         const nestedInstances = instances.flatMap((i) => {
-          const rel = i[parent];
+          const rel = i._relData?.[parent];
           return Array.isArray(rel) ? rel : rel ? [rel] : [];
         });
         if (nestedInstances.length) {
+          // If instance was loaded via connection proxy, we must use the proxy's constructor
+          // or the base constructor if it's not a proxy.
           const RelatedModel = nestedInstances[0].constructor;
           await RelatedModel._loadRelations(nestedInstances, { [nested]: null });
         }
@@ -1050,7 +1127,8 @@ export class Model {
       }
 
       // Resolve descriptor by calling the relation method on a dummy instance
-      const dummy = new this();
+      const ModelClass = typeof this === 'function' ? this : Object.getPrototypeOf(this);
+      const dummy = new ModelClass();
       if (typeof dummy[relationName] !== 'function') {
         throw new Error(`Relation '${relationName}' not found on ${this.name}. Define it as an instance method.`);
       }
@@ -1095,13 +1173,15 @@ class _RelationDescriptor {
   /** Execute this relation on the owner instance directly (non-eager) */
   async get() {
     const instance = this.owner;
+    const conn = instance?.constructor?._conn;
+    const RM = conn ? this.RelatedModel._withConnection(conn) : this.RelatedModel;
     switch (this.type) {
       case 'hasOne':
-        return this.RelatedModel.where(this.fk, instance[this.lk]).first();
+        return RM.where(this.fk, instance[this.lk]).first();
       case 'hasMany':
-        return this.RelatedModel.where(this.fk, instance[this.lk]).get();
+        return RM.where(this.fk, instance[this.lk]).get();
       case 'belongsTo':
-        return this.RelatedModel.where(this.lk, instance[this.fk]).first();
+        return RM.where(this.lk, instance[this.fk]).first();
       case 'belongsToMany': {
         const { RelatedModel, fk, lk, pivotTable, pivotFk } = this;
         const pkVal = instance[lk];
@@ -1109,8 +1189,8 @@ class _RelationDescriptor {
         const sql = `SELECT \`${relatedTable}\`.* FROM \`${relatedTable}\`
           INNER JOIN \`${pivotTable}\` ON \`${pivotTable}\`.\`${pivotFk}\` = \`${relatedTable}\`.\`${RelatedModel.primaryKey}\`
           WHERE \`${pivotTable}\`.\`${fk}\` = ?`;
-        const [rows] = await execute(sql, [pkVal]);
-        return RelatedModel._hydrateAll(rows);
+        const [rows] = await execute(sql, [pkVal], conn);
+        return RM._hydrateAll(rows);
       }
     }
   }
@@ -1121,6 +1201,8 @@ class _RelationDescriptor {
    */
   async _eagerLoad(instances, constraint) {
     const { type, RelatedModel, fk, lk, pivotTable, pivotFk } = this;
+    const conn = instances[0]?.constructor?._conn;
+    const RM = conn ? RelatedModel._withConnection(conn) : RelatedModel;
 
     // Infer the property name from calling context — passed by _loadRelations
     // We derive it lazily by inspecting what key each instance will receive.
@@ -1130,10 +1212,10 @@ class _RelationDescriptor {
       const parentKeys = [...new Set(instances.map((i) => i[lk]).filter((v) => v != null))];
       if (!parentKeys.length) return;
 
-      let qb = RelatedModel._query().whereIn(fk, parentKeys);
+      let qb = RM._query().whereIn(fk, parentKeys);
       if (constraint) constraint(qb);
 
-      const related = RelatedModel._hydrateAll(await qb.get());
+      const related = RM._hydrateAll(await qb.get());
       const grouped = {};
       for (const r of related) {
         const key = r[fk];
@@ -1155,10 +1237,10 @@ class _RelationDescriptor {
       const fkVals = [...new Set(instances.map((i) => i[fk]).filter((v) => v != null))];
       if (!fkVals.length) return;
 
-      let qb = RelatedModel._query().whereIn(lk, fkVals);
+      let qb = RM._query().whereIn(lk, fkVals);
       if (constraint) constraint(qb);
 
-      const related = RelatedModel._hydrateAll(await qb.get());
+      const related = RM._hydrateAll(await qb.get());
       const byKey = {};
       for (const r of related) byKey[r[lk]] = r;
 
@@ -1181,13 +1263,13 @@ class _RelationDescriptor {
           ON \`${pivotTable}\`.\`${pivotFk}\` = \`${relatedTable}\`.\`${RelatedModel.primaryKey}\`
         WHERE \`${pivotTable}\`.\`${fk}\` IN (${inPlaceholders})`;
 
-      const [rows] = await execute(sql, parentKeys);
+      const [rows] = await execute(sql, parentKeys, conn);
       const grouped = {};
       for (const row of rows) {
         const key = row.__pivot_fk;
         delete row.__pivot_fk;
         if (!grouped[key]) grouped[key] = new Collection();
-        grouped[key].push(RelatedModel._hydrate(row));
+        grouped[key].push(RM._hydrate(row));
       }
       for (const inst of instances) {
         const val = grouped[inst[lk]] ?? new Collection();

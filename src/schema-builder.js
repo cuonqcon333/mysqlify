@@ -17,6 +17,7 @@ class ColumnDefinition {
     this._autoIncrement = false;
     this._references = null;  // { column, table, onDelete, onUpdate }
     this._comment = null;
+    this._change = false;
   }
 
   nullable() {
@@ -91,6 +92,11 @@ class ColumnDefinition {
     return this;
   }
 
+  change() {
+    this._change = true;
+    return this;
+  }
+
   _toSQL() {
     let sql = `\`${this._name}\` ${this._type}`;
     const isNumeric = /^(INT|BIGINT|TINYINT|SMALLINT|MEDIUMINT|FLOAT|DOUBLE|DECIMAL)/i.test(this._type);
@@ -102,15 +108,19 @@ class ColumnDefinition {
     }
     if (this._autoIncrement) sql += ' AUTO_INCREMENT';
     if (this._defaultVal !== undefined) {
-      const val = typeof this._defaultVal === 'string'
-        ? `'${this._defaultVal.replace(/'/g, "\\'")}'`
-        : this._defaultVal === null
-          ? 'NULL'
-          : this._defaultVal === true
-            ? '1'
-            : this._defaultVal === false
-              ? '0'
-              : this._defaultVal;
+      const isSqlExpression = typeof this._defaultVal === 'string' &&
+        /^(CURRENT_TIMESTAMP|CURRENT_TIMESTAMP\(\)|NOW\(\)|CURRENT_DATE|CURRENT_TIME|CURRENT_USER)/i.test(this._defaultVal);
+      const val = isSqlExpression
+        ? this._defaultVal
+        : typeof this._defaultVal === 'string'
+          ? `'${this._defaultVal.replace(/'/g, "\\'")}'`
+          : this._defaultVal === null
+            ? 'NULL'
+            : this._defaultVal === true
+              ? '1'
+              : this._defaultVal === false
+                ? '0'
+                : this._defaultVal;
       sql += ` DEFAULT ${val}`;
     }
     if (this._comment) {
@@ -131,6 +141,8 @@ class Blueprint {
     this._uniques = [];
     this._indexes = [];
     this._foreignKeys = [];
+    this._dropColumns = [];
+    this._renameColumns = [];
   }
 
   id(name = 'id') {
@@ -293,6 +305,20 @@ class Blueprint {
     return builder;
   }
 
+  dropColumn(columns) {
+    const cols = typeof columns === 'string' ? [columns] : columns;
+    for (const c of cols) {
+      validateIdentifier(c, 'column');
+      this._dropColumns.push(c);
+    }
+  }
+
+  renameColumn(from, to) {
+    validateIdentifier(from, 'column');
+    validateIdentifier(to, 'column');
+    this._renameColumns.push({ from, to });
+  }
+
   _toSQL() {
     const parts = [];
 
@@ -400,11 +426,86 @@ export const Schema = {
     const blueprint = new Blueprint(tableName);
     callback(blueprint);
 
+    // ADD or MODIFY columns
     for (const col of blueprint._columns) {
+      if (col._change) {
+        await execute(
+          `ALTER TABLE \`${tableName}\` MODIFY COLUMN ${col._toSQL()}`,
+          []
+        );
+      } else {
+        await execute(
+          `ALTER TABLE \`${tableName}\` ADD COLUMN ${col._toSQL()}`,
+          []
+        );
+        // Column-level unique / index
+        if (col._unique) {
+          const idxName = `${tableName}_${col._name}_unique`;
+          await execute(
+            `ALTER TABLE \`${tableName}\` ADD UNIQUE KEY \`${idxName}\` (\`${col._name}\`)`,
+            []
+          );
+        } else if (col._index) {
+          const idxName = `${tableName}_${col._name}_index`;
+          await execute(
+            `ALTER TABLE \`${tableName}\` ADD KEY \`${idxName}\` (\`${col._name}\`)`,
+            []
+          );
+        }
+        // Column-level foreign key
+        if (col._references && col._references.table) {
+          const fkName = `${tableName}_${col._name}_foreign`;
+          await execute(
+            `ALTER TABLE \`${tableName}\` ADD CONSTRAINT \`${fkName}\` FOREIGN KEY (\`${col._name}\`) REFERENCES \`${col._references.table}\` (\`${col._references.column}\`) ON DELETE ${col._references.onDelete} ON UPDATE ${col._references.onUpdate}`,
+            []
+          );
+        }
+      }
+    }
+
+    // DROP columns
+    for (const colName of blueprint._dropColumns) {
       await execute(
-        `ALTER TABLE \`${tableName}\` ADD COLUMN ${col._toSQL()}`,
+        `ALTER TABLE \`${tableName}\` DROP COLUMN \`${colName}\``,
         []
       );
+    }
+
+    // RENAME columns
+    for (const rename of blueprint._renameColumns) {
+      await execute(
+        `ALTER TABLE \`${tableName}\` RENAME COLUMN \`${rename.from}\` TO \`${rename.to}\``,
+        []
+      );
+    }
+
+    // Composite unique keys
+    for (const cols of blueprint._uniques) {
+      const idxName = `${tableName}_${cols.join('_')}_unique`;
+      await execute(
+        `ALTER TABLE \`${tableName}\` ADD UNIQUE KEY \`${idxName}\` (\`${cols.join('\`, \`')}\`)`,
+        []
+      );
+    }
+
+    // Composite plain indexes
+    for (const idx of blueprint._indexes) {
+      const idxName = `${tableName}_${idx.join('_')}_index`;
+      await execute(
+        `ALTER TABLE \`${tableName}\` ADD KEY \`${idxName}\` (\`${idx.join('\`, \`')}\`)`,
+        []
+      );
+    }
+
+    // Explicit foreign keys via blueprint.foreign()
+    for (const fk of blueprint._foreignKeys) {
+      if (fk.references && fk.on) {
+        const fkName = `${tableName}_${fk.column}_foreign`;
+        await execute(
+          `ALTER TABLE \`${tableName}\` ADD CONSTRAINT \`${fkName}\` FOREIGN KEY (\`${fk.column}\`) REFERENCES \`${fk.on}\` (\`${fk.references}\`) ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}`,
+          []
+        );
+      }
     }
   },
 };

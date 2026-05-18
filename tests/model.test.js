@@ -1498,3 +1498,342 @@ describe('Eager Loading with()', () => {
     expect(users[0].posts.length).toBe(0);
   });
 });
+
+describe('Custom/non-auto-increment primary key', () => {
+  class UuidModel extends Model {
+    static table = 'uuid_models';
+    static primaryKey = 'uuid';
+    static timestamps = false;
+    static fillable = ['name'];
+  }
+
+  beforeEach(() => {
+    mockExecute.mockReset();
+  });
+
+  afterEach(() => {
+    // Clean up only UuidModel hooks, not global Model._hooks
+    const hookKeys = Object.keys(Model._hooks).filter(k => k.startsWith('UuidModel:'));
+    hookKeys.forEach(k => delete Model._hooks[k]);
+  });
+
+  test('create() uses PK set in creating hook instead of insertId', async () => {
+    UuidModel.on('creating', (instance) => {
+      instance.uuid = 'uuid-12345';
+    });
+
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 0 }])  // INSERT
+      .mockResolvedValueOnce([[{ uuid: 'uuid-12345', name: 'Test' }]]);  // find() refetch
+
+    const instance = await UuidModel.create({ name: 'Test' });
+    
+    expect(instance).toBeTruthy();
+    expect(instance.uuid).toBe('uuid-12345');
+    expect(instance.name).toBe('Test');
+    const [, insertParams] = mockExecute.mock.calls[0];
+    expect(insertParams).toContain('uuid-12345');
+  });
+
+  test('save() preserves PK set in creating hook', async () => {
+    UuidModel.on('creating', (instance) => {
+      instance.uuid = 'uuid-67890';
+    });
+
+    mockExecute.mockResolvedValue([{ insertId: 0 }]);
+
+    const instance = new UuidModel({ name: 'Test' });
+    await instance.save();
+
+    expect(instance.uuid).toBe('uuid-67890');
+    expect(instance._exists).toBe(true);
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params).toContain('uuid-67890');
+  });
+
+  test('save() does not overwrite manually set PK', async () => {
+    mockExecute.mockResolvedValue([{ insertId: 999 }]);
+
+    const instance = new UuidModel({ uuid: 'manual-uuid', name: 'Test' });
+    await instance.save();
+
+    expect(instance.uuid).toBe('manual-uuid');
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params).toContain('manual-uuid');
+  });
+
+  test('PK set by hook persists even when not in fillable', async () => {
+    UuidModel.on('creating', (instance) => {
+      instance.uuid = 'hook-uuid';
+    });
+
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 0 }])
+      .mockResolvedValueOnce([[{ uuid: 'hook-uuid', name: 'Test' }]]);
+
+    const instance = await UuidModel.create({ name: 'Test' });
+    
+    expect(instance.uuid).toBe('hook-uuid');
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params).toContain('hook-uuid');
+  });
+
+  test('fillable still blocks non-fillable user input', async () => {
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 1 }])
+      .mockResolvedValueOnce([[{ uuid: 1, name: 'Test' }]]);
+
+    await UuidModel.create({ name: 'Test', admin: true });
+    
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params).toContain('Test');
+    expect(params).not.toContain(true);
+  });
+
+  test('explicit PK from caller is preserved', async () => {
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 999 }])
+      .mockResolvedValueOnce([[{ uuid: 'caller-uuid', name: 'Test' }]]);
+
+    const instance = await UuidModel.create({ uuid: 'caller-uuid', name: 'Test' });
+    
+    expect(instance.uuid).toBe('caller-uuid');
+    const [, params] = mockExecute.mock.calls[0];
+    expect(params).toContain('caller-uuid');
+  });
+});
+
+// ─── P0#3: Alias live proxy — full round-trip ────────────────────────────────
+
+class TokenRW extends Model {
+  static table = 'tokens';
+  static timestamps = false;
+  static fillable = [];
+  static guarded = [];
+  static aliases = { access_token: 'accessToken', refresh_token: 'refreshToken' };
+}
+
+describe('Alias live proxy — full round-trip invariants', () => {
+  beforeEach(() => mockExecute.mockReset());
+
+  test('reading alias returns DB column value', () => {
+    const instance = TokenRW._hydrate({ id: 1, access_token: 'tok-a', refresh_token: 'ref-b' });
+    expect(instance.accessToken).toBe('tok-a');
+    expect(instance.refreshToken).toBe('ref-b');
+  });
+
+  test('set alias → updates DB col via _attributes', () => {
+    const instance = TokenRW._hydrate({ id: 1, access_token: 'old', refresh_token: 'r' });
+    instance.accessToken = 'new-token';
+    // DB col must reflect new value
+    expect(instance.access_token).toBe('new-token');
+    // _attributes must also reflect new value
+    expect(instance._attributes['access_token']).toBe('new-token');
+  });
+
+  test('set alias → dirty tracking sees DB col as dirty', () => {
+    const instance = TokenRW._hydrate({ id: 1, access_token: 'old', refresh_token: 'r' });
+    instance._exists = true;
+    instance.accessToken = 'changed';
+    const dirty = instance.getDirty();
+    // Dirty must contain DB col, NOT alias key
+    expect('access_token' in dirty).toBe(true);
+    expect('accessToken' in dirty).toBe(false);
+    expect(dirty.access_token).toBe('changed');
+  });
+
+  test('save() writes DB col to DB, not alias key', async () => {
+    mockExecute.mockResolvedValue([{ affectedRows: 1 }]);
+    const instance = TokenRW._hydrate({ id: 1, access_token: 'old', refresh_token: 'r' });
+    instance._exists = true;
+    instance.accessToken = 'updated';
+    await instance.save();
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('`access_token`');
+    expect(sql).not.toContain('`accessToken`');
+    expect(params).toContain('updated');
+  });
+
+  test('toJSON() outputs alias key, not DB col', () => {
+    const instance = TokenRW._hydrate({ id: 1, access_token: 'tok', refresh_token: 'ref' });
+    const json = instance.toJSON();
+    expect(json.accessToken).toBe('tok');
+    expect(json.refreshToken).toBe('ref');
+    expect(json.access_token).toBeUndefined();
+    expect(json.refresh_token).toBeUndefined();
+  });
+
+  test('hidden + alias: hiding DB col hides both DB col and alias in toJSON()', () => {
+    class HiddenToken extends TokenRW { static hidden = ['access_token']; }
+    const instance = HiddenToken._hydrate({ id: 1, access_token: 'secret', refresh_token: 'ref' });
+    const json = instance.toJSON();
+    expect(json.accessToken).toBeUndefined();
+    expect(json.access_token).toBeUndefined();
+    expect(json.refreshToken).toBe('ref');
+  });
+
+  test('alias key is non-enumerable (does not leak via spread)', () => {
+    const instance = TokenRW._hydrate({ id: 1, access_token: 'tok', refresh_token: 'ref' });
+    const spread = { ...instance };
+    // Alias keys are non-enumerable — only DB cols appear in spread
+    expect('accessToken' in spread).toBe(false);
+    expect('access_token' in spread).toBe(true);
+  });
+});
+
+// ─── P0#2: Hydration does NOT run mutators ───────────────────────────────────
+
+describe('Hydration — mutators are NOT called on DB-load paths', () => {
+  test('constructor with defineProperty does not trigger prototype setter', () => {
+    let setterCallCount = 0;
+    class MutatorModel extends Model {
+      static table = 'mutators';
+      static timestamps = false;
+      static fillable = [];
+      static guarded = [];
+      // Simulate a password mutator
+      set password(v) {
+        setterCallCount++;
+        // store hashed
+        Object.defineProperty(this, 'password', { value: 'hashed:' + v, writable: true, enumerable: true, configurable: true });
+      }
+    }
+
+    setterCallCount = 0;
+    // Direct construction (used by _hydrate) — should NOT call setter
+    const instance = new MutatorModel({ id: 1, password: 'already-hashed-from-db' });
+    expect(setterCallCount).toBe(0);
+    expect(instance.password).toBe('already-hashed-from-db');
+  });
+
+  test('freshly hydrated instance is NOT dirty', async () => {
+    mockExecute.mockResolvedValue([[{ id: 1, access_token: 'tok', refresh_token: 'ref' }]]);
+    const instance = await TokenRW.find(1);
+    expect(instance.isDirty()).toBe(false);
+  });
+
+  test('fresh() reload does not run mutator', async () => {
+    let setterCalls = 0;
+    class ReloadModel extends Model {
+      static table = 'reload_m';
+      static timestamps = false;
+      static fillable = [];
+      static guarded = [];
+      set name(v) { setterCalls++; this._name = v; }
+      get name() { return this._name; }
+    }
+    mockExecute
+      .mockResolvedValueOnce([[{ id: 1, name: 'original' }]])
+      .mockResolvedValueOnce([[{ id: 1, name: 'refreshed' }]]);
+    const instance = await ReloadModel.find(1);
+    setterCalls = 0;  // reset — only count reloads
+    await instance.fresh();
+    expect(setterCalls).toBe(0);
+  });
+});
+
+// ─── P1#6: saving / saved event order ────────────────────────────────────────
+
+describe('saving/saved lifecycle event order', () => {
+  beforeEach(() => {
+    mockExecute.mockReset();
+    Model._hooks = {};
+  });
+
+  test('create path fires: saving → creating → created → saved (in order)', async () => {
+    const order = [];
+    class EventModel extends Model {
+      static table = 'event_m';
+      static timestamps = false;
+      static fillable = ['name'];
+    }
+    EventModel.on('creating', () => { order.push('creating'); });
+    EventModel.on('saving',   () => { order.push('saving');   });
+    EventModel.on('created',  () => { order.push('created');  });
+    EventModel.on('saved',    () => { order.push('saved');    });
+
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 1 }])
+      .mockResolvedValueOnce([[{ id: 1, name: 'x' }]]);
+
+    await EventModel.create({ name: 'x' });
+    expect(order).toEqual(['saving', 'creating', 'created', 'saved']);
+  });
+
+  test('update path (instance.save) fires: saving → updating → updated → saved (in order)', async () => {
+    const order = [];
+    class UpdateEventModel extends Model {
+      static table = 'upd_event_m';
+      static timestamps = false;
+      static fillable = ['name'];
+    }
+    UpdateEventModel.on('saving',   () => { order.push('saving');   });
+    UpdateEventModel.on('updating', () => { order.push('updating'); });
+    UpdateEventModel.on('updated',  () => { order.push('updated');  });
+    UpdateEventModel.on('saved',    () => { order.push('saved');    });
+
+    mockExecute.mockResolvedValue([{ affectedRows: 1 }]);
+    const instance = new UpdateEventModel({ id: 5, name: 'old' });
+    instance._exists = true;
+    instance.name = 'new';
+    await instance.save();
+    expect(order).toEqual(['saving', 'updating', 'updated', 'saved']);
+  });
+
+  test('instance.update() fires: saving → updating → updated → saved', async () => {
+    const order = [];
+    class UpdateModel2 extends Model {
+      static table = 'upd2';
+      static timestamps = false;
+      static fillable = ['name'];
+    }
+    UpdateModel2.on('saving',   () => { order.push('saving');   });
+    UpdateModel2.on('updating', () => { order.push('updating'); });
+    UpdateModel2.on('updated',  () => { order.push('updated');  });
+    UpdateModel2.on('saved',    () => { order.push('saved');    });
+
+    mockExecute.mockResolvedValue([{ affectedRows: 1 }]);
+    const instance = new UpdateModel2({ id: 1, name: 'old' });
+    instance._exists = true;
+    await instance.update({ name: 'new' });
+    expect(order).toEqual(['saving', 'updating', 'updated', 'saved']);
+  });
+
+  test('saving hook returning false cancels INSERT — does not fire created/saved', async () => {
+    const order = [];
+    class SavingCancel extends Model {
+      static table = 'saving_cancel';
+      static timestamps = false;
+      static fillable = ['name'];
+    }
+    SavingCancel.on('creating', () => { order.push('creating'); });  // must register to capture
+    SavingCancel.on('saving',   () => { order.push('saving'); return false; });
+    SavingCancel.on('created',  () => { order.push('created'); });
+    SavingCancel.on('saved',    () => { order.push('saved'); });
+
+    const result = await SavingCancel.create({ name: 'x' });
+    expect(result).toBeNull();
+    expect(mockExecute).not.toHaveBeenCalled();
+    // saving fires first and intercepts — creating/created/saved must NOT fire
+    expect(order).toEqual(['saving']);
+  });
+
+  test('observer receives correct instance state at each event', async () => {
+    const snapshots = {};
+    class SnapshotModel extends Model {
+      static table = 'snap_m';
+      static timestamps = false;
+      static fillable = ['name'];
+    }
+    SnapshotModel.on('creating', (i) => { snapshots.creating = i.name; });
+    SnapshotModel.on('created',  (i) => { snapshots.created  = i.name; });
+
+    mockExecute
+      .mockResolvedValueOnce([{ insertId: 7 }])
+      .mockResolvedValueOnce([[{ id: 7, name: 'snap-item' }]]);
+
+    await SnapshotModel.create({ name: 'snap-item' });
+    expect(snapshots.creating).toBe('snap-item');
+    expect(snapshots.created).toBe('snap-item');
+  });
+});

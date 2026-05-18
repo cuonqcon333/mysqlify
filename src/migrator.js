@@ -112,7 +112,7 @@ export async function migrateRollback(migrationsDir = './migrations') {
   const rolledBack = [];
   for (const row of rows) {
     const base = join(resolve(migrationsDir), row.migration);
-    const filePath = [base + '.js', base + '.cjs', base + '.mjs'].find(fs.existsSync) ?? (base + '.js');
+    const filePath = [base + '.js', base + '.cjs', base + '.mjs'].find((p) => fs(p)) ?? (base + '.js');
     const fileUrl = pathToFileURL(filePath).href;
 
     let migration;

@@ -518,3 +518,128 @@ describe('QueryBuilder — Multiple JOIN chaining', () => {
     expect(sql).toContain('INNER JOIN `d`');
   });
 });
+
+// ─── P0#4: orWhere call-order boolean semantics ──────────────────────────────
+
+describe('QueryBuilder — orWhere call-order semantics', () => {
+  test('where(a).orWhere(b).where(c) preserves call order: a OR b AND c', () => {
+    const qb = new QueryBuilder()
+      .table('users')
+      .where('a', 1)
+      .orWhere('b', 2)
+      .where('c', 3);
+    const { sql, params } = qb._buildSelect();
+    // Invariant: conditions appear in call order
+    const aPos = sql.indexOf('`a`');
+    const bPos = sql.indexOf('`b`');
+    const cPos = sql.indexOf('`c`');
+    expect(aPos).toBeLessThan(bPos);
+    expect(bPos).toBeLessThan(cPos);
+    // OR keyword appears before AND for b
+    const orPos = sql.indexOf('OR');
+    const andPos = sql.lastIndexOf('AND', cPos);
+    expect(orPos).toBeLessThan(andPos);
+    expect(params).toEqual([1, 2, 3]);
+  });
+
+  test('where(a).where(b).orWhere(c) → a AND b OR c', () => {
+    const qb = new QueryBuilder()
+      .table('users')
+      .where('a', 1)
+      .where('b', 2)
+      .orWhere('c', 3);
+    const { sql, params } = qb._buildSelect();
+    // a comes first, then b, then OR c
+    const aPos = sql.indexOf('`a`');
+    const bPos = sql.indexOf('`b`');
+    const cPos = sql.indexOf('`c`');
+    expect(aPos).toBeLessThan(bPos);
+    expect(bPos).toBeLessThan(cPos);
+    expect(sql).toContain('OR');
+    expect(params).toEqual([1, 2, 3]);
+  });
+
+  test('orWhere emitted first produces correct prefix (no leading AND)', () => {
+    const qb = new QueryBuilder().table('users').orWhere('x', 99);
+    const { sql, params } = qb._buildSelect();
+    // First condition never has a prefix connector
+    expect(sql).toContain('WHERE `x` = ?');
+    expect(params).toEqual([99]);
+  });
+
+  test('soft-delete filter appended after all user conditions', () => {
+    const qb = new QueryBuilder().table('posts');
+    qb._setSoftDelete('deleted_at');
+    qb.where('a', 1).orWhere('b', 2);
+    const { sql } = qb._buildSelect();
+    // deleted_at IS NULL must appear after user conditions
+    const bPos = sql.indexOf('`b`');
+    const delPos = sql.indexOf('`deleted_at`');
+    expect(bPos).toBeLessThan(delPos);
+    expect(sql).toContain('`deleted_at` IS NULL');
+  });
+});
+
+// ─── P2#10: dotted columns in orderBy / groupBy ──────────────────────────────
+
+describe('QueryBuilder — dotted columns in orderBy / groupBy', () => {
+  test('orderBy("users.name") produces `users`.`name`', () => {
+    const qb = new QueryBuilder().table('users').orderBy('users.name');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('ORDER BY `users`.`name` ASC');
+    expect(sql).not.toContain('`users.name`');
+  });
+
+  test('groupBy("users.status") produces `users`.`status`', () => {
+    const qb = new QueryBuilder().table('users').groupBy('users.status');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('GROUP BY `users`.`status`');
+    expect(sql).not.toContain('`users.status`');
+  });
+
+  test('non-dotted column in orderBy still wraps normally', () => {
+    const qb = new QueryBuilder().table('users').orderBy('name', 'DESC');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('ORDER BY `name` DESC');
+  });
+
+  test('multiple groupBy columns — dotted and plain', () => {
+    const qb = new QueryBuilder().table('orders').groupBy('users.id', 'status');
+    const { sql } = qb._buildSelect();
+    expect(sql).toContain('`users`.`id`');
+    expect(sql).toContain('`status`');
+  });
+});
+
+// ─── P1#5: restore() WHERE targeting ────────────────────────────────────────
+
+describe('QueryBuilder — restore() targets correct rows', () => {
+  test('restore() issues UPDATE without deleted_at IS NULL filter', async () => {
+    mockExecute.mockResolvedValue([{ affectedRows: 1 }]);
+    const qb = new QueryBuilder().table('posts');
+    qb._setSoftDelete('deleted_at');
+    qb.where('id', 5);
+    await qb.restore();
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(sql).toContain('UPDATE `posts`');
+    expect(sql).toContain('SET `deleted_at` = ?');
+    expect(params[0]).toBeNull();
+    // WHERE clause must contain user's condition
+    expect(sql).toContain('WHERE');
+    expect(params).toContain(5);
+    // Must NOT add deleted_at IS NULL — restore targets trashed rows, not active ones
+    expect(sql).not.toContain('IS NULL');
+  });
+
+  test('_clone() preserves _conn, _includeTrashed, _onlyTrashed', () => {
+    const fakeConn = { execute: jest.fn() };
+    const qb = new QueryBuilder().table('users');
+    qb._conn = fakeConn;
+    qb._includeTrashed = true;
+    qb._onlyTrashed = true;
+    const cloned = qb._clone();
+    expect(cloned._conn).toBe(fakeConn);
+    expect(cloned._includeTrashed).toBe(true);
+    expect(cloned._onlyTrashed).toBe(true);
+  });
+});
