@@ -16,9 +16,9 @@
   },
   "scripts": {
     "build": "node build.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --no-coverage --testPathIgnorePatterns=tests/integration/",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/integration/ --no-coverage",
-    "test:all": "node --experimental-vm-modules node_modules/jest/bin/jest.js --no-coverage",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --no-coverage",
+    "test:integration": "node -e \"process.env.MYSQLIFY_RUN_INTEGRATION='1'; require('child_process').spawn('node', ['--experimental-vm-modules', 'node_modules/jest/bin/jest.js', '--config', 'jest.integration.config.js', '--no-coverage'], { stdio: 'inherit', shell: true })\"",
+    "test:all": "npm run test && npm run test:integration",
     "docker:up": "docker compose -f docker-compose.integration.yml up -d",
     "docker:down": "docker compose -f docker-compose.integration.yml down",
     "prepublishOnly": "npm run build"

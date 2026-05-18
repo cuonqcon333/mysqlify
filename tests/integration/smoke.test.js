@@ -8,7 +8,15 @@ const engines = [
   { name: 'MariaDB 10.5', port: 3309, expectRenameFail: false },
 ];
 
-describe('Real Engine Integration Validation Suite', () => {
+const runIntegration = process.env.MYSQLIFY_RUN_INTEGRATION === '1';
+
+if (!runIntegration) {
+  console.warn('[Integration] Skipping Integration Suite: MYSQLIFY_RUN_INTEGRATION is not set to "1". To run, execute "npm run docker:up" then "MYSQLIFY_RUN_INTEGRATION=1 npm run test:integration"');
+}
+
+const describeSuite = runIntegration ? describe : describe.skip;
+
+describeSuite('Real Engine Integration Validation Suite', () => {
   for (const engine of engines) {
     describe(`Engine: ${engine.name} (Port ${engine.port})`, () => {
       beforeEach(async () => {

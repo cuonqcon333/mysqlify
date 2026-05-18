@@ -27,7 +27,7 @@ jobs:
         run: npm ci
 
       - name: Run tests
-        run: node --experimental-vm-modules node_modules/jest/bin/jest.js --no-coverage
+        run: npm test
 
       - name: Build
         run: node build.js
